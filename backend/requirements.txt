@@ -4,6 +4,7 @@ pandas
 numpy==1.26.4
 pandas-ta @ https://www.pandas-ta.dev/assets/zip/pandas_ta-0.3.14b.tar.gz
 anthropic
+google-generativeai
 supabase
 httpx
 requests

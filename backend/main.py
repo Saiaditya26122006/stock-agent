@@ -13,9 +13,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from analysis.claude_synthesis import (
+    format_morning_briefing,
+    get_user_config,
+    synthesise_all,
+)
 from analysis.ta_engine import analyse_stock
 from data.upstox import get_historical_ohlcv, test_connection as test_upstox_connection
-from db.recommendations import get_todays_recommendations, get_win_rate
+from db.recommendations import (
+    get_todays_recommendations,
+    get_win_rate,
+    log_recommendation,
+)
 from db.supabase_client import supabase_client, test_connection as test_supabase_connection
 from db.watchlist import add_symbol, get_active_watchlist, get_symbols_list, remove_symbol
 
@@ -217,6 +226,7 @@ def run_analysis(req: Optional[RunAnalysisRequest] = None) -> Dict[str, Any]:
     run_id = None
     errors: List[Dict[str, str]] = []
     results: Dict[str, Any] = {}
+    full_signals: Dict[str, Dict[str, Any]] = {}
     try:
         run_id = log_run_start(user_id=req.user_id)
         symbols = get_symbols_list(user_id=req.user_id)
@@ -224,6 +234,7 @@ def run_analysis(req: Optional[RunAnalysisRequest] = None) -> Dict[str, Any]:
             try:
                 df = get_historical_ohlcv(symbol=symbol, interval="day", days=90)
                 signal = analyse_stock(symbol=symbol, timeframe="day", df=df)
+                full_signals[symbol] = signal
                 results[symbol] = {
                     "symbol": signal.get("symbol"),
                     "current_price": signal.get("current_price"),
@@ -243,14 +254,55 @@ def run_analysis(req: Optional[RunAnalysisRequest] = None) -> Dict[str, Any]:
                 errors.append({"symbol": symbol, "error": str(exc)})
 
         analysed = len(results)
+        user_config = get_user_config(user_id=req.user_id)
+        recommendations = synthesise_all(symbols_signals=full_signals, user_config=user_config)
+        briefing = format_morning_briefing(
+            all_recommendations=recommendations,
+            user_config=user_config,
+        )
+
+        # Log actionable trades to recommendations_log
+        for symbol, rec in recommendations.items():
+            if rec.get("action") not in {"BUY", "SELL"}:
+                continue
+            signal = full_signals.get(symbol, {})
+            rec_payload = {
+                "user_id": req.user_id,
+                "date": _now_ist().date().isoformat(),
+                "stock": symbol,
+                "style": rec.get("style", "intraday"),
+                "entry_price": rec.get("entry_price", 0.0),
+                "target": rec.get("target", 0.0),
+                "stop_loss": rec.get("stop_loss", 0.0),
+                "risk_score": (signal.get("atr") or {}).get("pct_of_price", 0.0) or 0.0,
+                "sentiment_score": 0.0,
+            }
+            log_res = log_recommendation(rec_payload)
+            if not log_res.get("success"):
+                errors.append(
+                    {
+                        "symbol": symbol,
+                        "error": f"Failed to log recommendation: {log_res.get('message')}",
+                    }
+                )
+
         if run_id:
-            log_run_complete(run_id, stocks_analysed=analysed, recommendations_count=analysed)
+            actionable_count = len(
+                [r for r in recommendations.values() if r.get("action") in {"BUY", "SELL"}]
+            )
+            log_run_complete(
+                run_id,
+                stocks_analysed=analysed,
+                recommendations_count=actionable_count,
+            )
 
         return {
             "run_id": run_id,
             "timestamp": _now_ist().isoformat(),
             "stocks_analysed": analysed,
             "results": results,
+            "recommendations": recommendations,
+            "morning_briefing": briefing,
             "market_status": _market_status(),
             "errors": errors,
         }
