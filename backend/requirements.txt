@@ -1,0 +1,17 @@
+fastapi
+uvicorn
+pandas
+pandas-ta
+numpy
+anthropic
+supabase
+httpx
+requests
+feedparser
+python-dotenv
+pydantic
+python-telegram-bot
+APScheduler
+jinja2
+pytest
+websockets
