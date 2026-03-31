@@ -27,6 +27,7 @@ from db.recommendations import (
 )
 from db.supabase_client import supabase_client, test_connection as test_supabase_connection
 from db.watchlist import add_symbol, get_active_watchlist, get_symbols_list, remove_symbol
+from scheduler import get_scheduler_status, init_scheduler, morning_analysis_job, trigger_morning_now
 
 
 logging.basicConfig(level=logging.INFO)
@@ -44,6 +45,7 @@ app.add_middleware(
 
 _run_state_lock = threading.Lock()
 _analysis_running = False
+_scheduler = None
 
 
 class ErrorResponse(BaseModel):
@@ -176,6 +178,11 @@ def startup_event() -> None:
         logger.warning("Supabase startup check failed.")
     if not test_upstox_connection():
         logger.warning("Upstox startup check failed.")
+    global _scheduler
+    try:
+        _scheduler = init_scheduler(app)
+    except Exception as exc:
+        logger.error("Scheduler initialization failed: %s", exc)
 
 
 @app.get("/health", status_code=200, response_model=Dict[str, str])
@@ -313,6 +320,11 @@ def run_analysis(req: Optional[RunAnalysisRequest] = None) -> Dict[str, Any]:
         _exit_analysis_lock()
 
 
+def run_analysis_pipeline(user_id: str = "sai_aditya") -> Dict[str, Any]:
+    """Internal callable pipeline for scheduler-triggered runs."""
+    return run_analysis(RunAnalysisRequest(user_id=user_id))
+
+
 @app.get("/recommendations/today", status_code=200, response_model=Dict[str, Any])
 def recommendations_today(user_id: str = "sai_aditya") -> Dict[str, Any]:
     """Return today's recommendations for the given user."""
@@ -326,4 +338,23 @@ def recommendations_winrate(user_id: str = "sai_aditya", last_n: int = 20) -> Di
     """Return win-rate summary computed from recent closed recommendations."""
 
     return get_win_rate(user_id=user_id, last_n=last_n)
+
+
+@app.get("/scheduler/status", status_code=200, response_model=Dict[str, Any])
+def scheduler_status() -> Dict[str, Any]:
+    """Return scheduler running state and next run times."""
+    return get_scheduler_status()
+
+
+@app.post("/scheduler/trigger-morning", status_code=200, response_model=Dict[str, Any])
+async def scheduler_trigger_morning() -> Dict[str, Any]:
+    """Manually trigger morning analysis job immediately."""
+    try:
+        if trigger_morning_now():
+            return {"success": True, "message": "Morning job queued."}
+        await morning_analysis_job()
+        return {"success": True, "message": "Morning job executed directly."}
+    except Exception as exc:
+        logger.error("Manual morning trigger failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"Failed to trigger morning job: {exc}") from exc
 

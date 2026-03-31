@@ -14,5 +14,6 @@ pydantic
 python-telegram-bot
 APScheduler
 jinja2
+pytz
 pytest
 websockets
