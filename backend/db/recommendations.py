@@ -114,7 +114,8 @@ def get_todays_recommendations(user_id: str = "sai_aditya") -> List[Dict[str, An
         List of recommendation dicts; [] if none or on error.
     """
 
-    today = date.today().isoformat()
+    ist = __import__("pytz").timezone("Asia/Kolkata")
+    today = __import__("datetime").datetime.now(ist).date().isoformat()
     try:
         resp = (
             supabase_client.table("recommendations_log")

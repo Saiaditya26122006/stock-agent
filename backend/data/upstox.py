@@ -78,7 +78,9 @@ class UpstoxClient:
                 "Missing UPSTOX_ACCESS_TOKEN in environment. "
                 "Set it in backend/.env and reload."
             )
+        analytics_token = os.getenv("UPSTOX_ANALYTICS_TOKEN", "").strip()
         self._token = token
+        self._analytics_token = analytics_token or token
         self._headers = {
             "Accept": "application/json",
             "Content-Type": "application/json",
@@ -114,6 +116,7 @@ class UpstoxClient:
         url: str,
         *,
         context: str,
+        headers: Optional[Dict[str, str]] = None,
         retryable: Optional[Callable[[httpx.Response], bool]] = None,
     ) -> httpx.Response:
         """
@@ -127,7 +130,10 @@ class UpstoxClient:
         last_err: Optional[BaseException] = None
         for attempt in range(_MAX_RETRIES):
             try:
-                resp = self._http.request(method, url, headers=self._headers)
+                merged_headers = dict(self._headers)
+                if headers:
+                    merged_headers.update(headers)
+                resp = self._http.request(method, url, headers=merged_headers)
                 if retryable(resp) and attempt < _MAX_RETRIES - 1:
                     time.sleep(_RETRY_DELAY_SEC)
                     continue
@@ -263,12 +269,61 @@ def _get_client() -> UpstoxClient:
 
 
 def _resolve_instrument_key(symbol: str) -> str:
+    return get_instrument_key(symbol)
+
+
+def get_instrument_key(symbol: str) -> str:
+    """
+    Resolve instrument key for NSE equities with in-memory session caching.
+
+    Resolution order:
+    1) Fast path from INSTRUMENT_KEYS dict.
+    2) Upstox instrument search API lookup, exact NSE_EQ + trading_symbol match.
+    3) Raise unknown-symbol ValueError if no mapping found.
+    """
     key = symbol.strip().upper()
-    if key not in INSTRUMENT_KEYS:
-        raise ValueError(
-            f"Unknown symbol {symbol!r}: add it to INSTRUMENT_KEYS or use a mapped ticker."
-        )
-    return INSTRUMENT_KEYS[key]
+    if key in INSTRUMENT_KEYS:
+        return INSTRUMENT_KEYS[key]
+
+    client = _get_client()
+    query = quote(key, safe="")
+    url = f"{client.base_url}/instruments/search?query={query}&asset_type=equity"
+    resp = client.request(
+        "GET",
+        url,
+        context="Instrument search",
+        headers={"Authorization": f"Bearer {client._analytics_token}"},
+    )
+    client._raise_http(resp, "Instrument search")
+
+    body = resp.json()
+    if body.get("status") != "success":
+        raise RuntimeError(f"Instrument search: bad payload — {body!s}")
+
+    data = body.get("data") or []
+    if isinstance(data, dict):
+        data = [data]
+    if not isinstance(data, list):
+        data = []
+
+    for row in data:
+        if not isinstance(row, dict):
+            continue
+        if row.get("exchange") != "NSE_EQ":
+            continue
+        trading_symbol = str(row.get("trading_symbol") or "").strip().upper()
+        if trading_symbol != key:
+            continue
+        instrument_key = str(row.get("instrument_key") or "").strip()
+        if not instrument_key:
+            continue
+        # Cache for this process so repeat lookups are instant.
+        INSTRUMENT_KEYS[key] = instrument_key
+        return instrument_key
+
+    raise ValueError(
+        f"Unknown symbol {symbol!r}: add it to INSTRUMENT_KEYS or use a mapped ticker."
+    )
 
 
 def get_historical_ohlcv(symbol: str, interval: str, days: int) -> pd.DataFrame:
