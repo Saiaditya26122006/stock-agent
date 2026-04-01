@@ -23,6 +23,12 @@ from analysis.feasibility import check_target_feasibility, get_india_vix, get_ma
 from analysis.position_sizing import calculate_position_size
 from analysis.risk_scorer import compute_risk_score, should_skip_stock
 from analysis.sentiment import get_sentiment_batch
+from analysis.market_regime import (
+    apply_regime_to_position,
+    filter_by_regime,
+    get_regime_config,
+    get_regime_prompt_injection,
+)
 from data.upstox import get_historical_ohlcv, test_connection as test_upstox_connection
 from db.recommendations import (
     get_todays_recommendations,
@@ -205,6 +211,7 @@ def run_analysis(req: Optional[RunAnalysisRequest] = None) -> Dict[str, Any]:
     risk_score_results: Dict[str, Dict[str, Any]] = {}
     skipped_symbols: List[Dict[str, str]] = []
     feasibility_result: Dict[str, Any] = {}
+    regime_config: Dict[str, Any] = get_regime_config(15.0)
     india_vix = 15.0
     market_regime = "NORMAL"
     try:
@@ -213,13 +220,16 @@ def run_analysis(req: Optional[RunAnalysisRequest] = None) -> Dict[str, Any]:
         try:
             india_vix = float(get_india_vix())
             market_regime = get_market_regime(india_vix)
+            regime_config = get_regime_config(india_vix)
             logger.info("Market regime: %s | VIX: %.2f", market_regime, india_vix)
+            logger.info("Regime config: %s", regime_config)
             if market_regime == "DANGER":
                 logger.warning("DANGER regime detected — trade filtering will be stricter.")
         except Exception as exc:
             logger.error("Pre-market feasibility fetch failed: %s", exc)
             india_vix = 15.0
             market_regime = "NORMAL"
+            regime_config = get_regime_config(india_vix)
 
         for symbol in symbols:
             try:
@@ -284,7 +294,12 @@ def run_analysis(req: Optional[RunAnalysisRequest] = None) -> Dict[str, Any]:
 
         analysed = len(results)
         user_config = get_user_config(user_id=req.user_id)
-        recommendations = synthesise_all(symbols_signals=filtered_signals, user_config=user_config)
+        regime_context = get_regime_prompt_injection(regime_config)
+        recommendations = synthesise_all(
+            symbols_signals=filtered_signals,
+            user_config=user_config,
+            regime_context=regime_context,
+        )
 
         for skipped in skipped_symbols:
             sym = skipped.get("symbol", "")
@@ -307,12 +322,26 @@ def run_analysis(req: Optional[RunAnalysisRequest] = None) -> Dict[str, Any]:
                 rec["risk_score"] = float((risk_score_results.get(symbol) or {}).get("risk_score", 5.0))
                 rec["sentiment_score"] = float((sentiment_results.get(symbol) or {}).get("sentiment_score", 0.0))
                 if rec.get("action") in {"BUY", "SELL"}:
+                    min_risk = float(regime_config.get("min_risk_score", 5.0))
+                    if float(rec["risk_score"]) < min_risk:
+                        rec["action"] = "SKIP"
+                        rec["reasoning"] = (
+                            f"{rec.get('reasoning', '')} | Regime gate: risk_score below {min_risk}"
+                        ).strip(" |")
+                        skipped_symbols.append(
+                            {"symbol": symbol, "reason": f"regime_min_risk_below_{min_risk}"}
+                        )
+                        continue
                     sizing_result = calculate_position_size(
                         capital=float(user_config.get("capital", 0.0)),
                         risk_score=float((risk_score_results.get(symbol) or {}).get("risk_score", 5.0)),
                         entry_price=float(rec.get("entry_price", 0.0) or 0.0),
                         stop_loss=float(rec.get("stop_loss", 0.0) or 0.0),
                     )
+                    try:
+                        sizing_result = apply_regime_to_position(sizing_result, regime_config)
+                    except Exception as regime_exc:
+                        logger.error("Regime override failed for %s: %s", symbol, regime_exc)
                     rec["position_sizing"] = sizing_result
                     logger.info("Position size computed for %s: %s", symbol, sizing_result.get("reason"))
                     if sizing_result.get("action") == "skip":
@@ -322,6 +351,11 @@ def run_analysis(req: Optional[RunAnalysisRequest] = None) -> Dict[str, Any]:
                         ).strip(" |")
             except Exception as exc:
                 logger.error("Position sizing enrichment failed for %s: %s", symbol, exc)
+
+        try:
+            recommendations = filter_by_regime(recommendations, regime_config)
+        except Exception as exc:
+            logger.error("Regime recommendation filtering failed: %s", exc)
 
         try:
             feasibility_result = check_target_feasibility(
@@ -401,6 +435,7 @@ def run_analysis(req: Optional[RunAnalysisRequest] = None) -> Dict[str, Any]:
             "sentiment_results": sentiment_results,
             "risk_scores": risk_score_results,
             "feasibility": feasibility_result,
+            "regime_config": regime_config,
             "skipped_symbols": skipped_symbols,
             "errors": errors,
         }

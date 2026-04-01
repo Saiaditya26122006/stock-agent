@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -13,7 +14,6 @@ from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from google import genai
-from google.genai import types
 
 from db.supabase_client import supabase_client
 
@@ -29,25 +29,33 @@ _DEFAULT_CONFIG = {
 
 
 def _load_env() -> None:
-    """Load backend .env so API credentials are available."""
-
     env_path = Path(__file__).resolve().parent.parent / ".env"
     if env_path.exists():
         load_dotenv(env_path)
 
 
 def _round_price(value: Any) -> float:
-    """Round price-like value to 2 decimals, falling back to 0.0."""
-
     try:
         return round(float(value), 2)
     except Exception:
         return 0.0
 
 
-def _build_prompt(symbol: str, signal_dict: Dict[str, Any], user_config: Dict[str, Any]) -> str:
-    """Build a strict JSON-only prompt for Claude synthesis."""
+def _strip_markdown_fences(text: str) -> str:
+    """Remove markdown code fences from Gemini responses."""
+    text = text.strip()
+    # Remove ```json ... ``` or ``` ... ```
+    text = re.sub(r'^```(?:json)?\s*', '', text)
+    text = re.sub(r'\s*```$', '', text)
+    return text.strip()
 
+
+def _build_prompt(
+    symbol: str,
+    signal_dict: Dict[str, Any],
+    user_config: Dict[str, Any],
+    regime_context: str = "",
+) -> str:
     current_price = signal_dict.get("current_price")
     ema_trend = (signal_dict.get("ema") or {}).get("trend")
     rsi_value = (signal_dict.get("rsi") or {}).get("value")
@@ -61,7 +69,7 @@ def _build_prompt(symbol: str, signal_dict: Dict[str, Any], user_config: Dict[st
     patterns = signal_dict.get("patterns") or []
     overall_signal = signal_dict.get("overall_signal")
 
-    return f"""
+    prompt = f"""
 You are an expert NSE/BSE trader and technical analyst.
 
 Analyse this stock setup and provide one actionable recommendation.
@@ -103,11 +111,12 @@ Rules:
 3) Target and SL must be based on actual support/resistance levels from the data above, not arbitrary percentages.
 4) Respond with raw JSON only, no markdown, no code blocks, no preamble.
 """.strip()
+    if regime_context:
+        prompt = regime_context + "\n\n" + prompt
+    return prompt
 
 
 def _fallback_skip(symbol: str, signal_dict: Dict[str, Any], reason: str) -> Dict[str, Any]:
-    """Build a safe SKIP recommendation when synthesis cannot be completed."""
-
     return {
         "symbol": symbol,
         "action": "SKIP",
@@ -125,13 +134,6 @@ def _fallback_skip(symbol: str, signal_dict: Dict[str, Any], reason: str) -> Dic
 
 
 def get_user_config(user_id: str = "sai_aditya") -> Dict[str, Any]:
-    """
-    Fetch user configuration from Supabase with safe defaults on failure.
-
-    Returns:
-        Dict with capital, daily_target, paper_mode, risk_per_trade_pct.
-    """
-
     try:
         resp = (
             supabase_client.table("user_config")
@@ -163,23 +165,23 @@ def get_user_config(user_id: str = "sai_aditya") -> Dict[str, Any]:
 
 
 def synthesise_recommendation(
-    symbol: str, signal_dict: Dict[str, Any], user_config: Dict[str, Any]
+    symbol: str,
+    signal_dict: Dict[str, Any],
+    user_config: Dict[str, Any],
+    regime_context: str = "",
 ) -> Dict[str, Any]:
-    """
-    Convert raw TA signal data into an actionable RecommendationDict via Claude.
-
-    Returns:
-        {
-          symbol, action, style, entry_price, target, stop_loss, hold_period,
-          risk_reward, confidence, reasoning, risk_factors, overall_signal
-        }
-    """
-
     _load_env()
     gemini_api_key = os.getenv("GEMINI_API_KEY", "").strip()
     if not gemini_api_key:
         return _fallback_skip(symbol, signal_dict, "Missing GEMINI_API_KEY in .env.")
-    prompt = _build_prompt(symbol=symbol, signal_dict=signal_dict, user_config=user_config)
+    prompt = _build_prompt(
+        symbol=symbol,
+        signal_dict=signal_dict,
+        user_config=user_config,
+        regime_context=regime_context,
+    )
+    if regime_context:
+        logger.info("Regime context injected into synthesis prompt for %s.", symbol)
 
     try:
         client = genai.Client(api_key=gemini_api_key)
@@ -193,10 +195,11 @@ def synthesise_recommendation(
         return _fallback_skip(symbol, signal_dict, f"Gemini API call failed: {exc}")
 
     try:
-        parsed = json.loads(raw_text)
+        cleaned_text = _strip_markdown_fences(raw_text)
+        parsed = json.loads(cleaned_text)
     except Exception:
-        logger.error("Claude JSON parse failed for %s. Raw response: %s", symbol, raw_text)
-        return _fallback_skip(symbol, signal_dict, f"Invalid Claude JSON response: {raw_text}")
+        logger.error("JSON parse failed for %s. Raw response: %s", symbol, raw_text)
+        return _fallback_skip(symbol, signal_dict, f"Invalid JSON response from model.")
 
     action = str(parsed.get("action", "SKIP")).upper()
     if action not in {"BUY", "SELL", "WATCH", "SKIP"}:
@@ -215,7 +218,6 @@ def synthesise_recommendation(
         target = 0.0
         stop = 0.0
 
-    # Risk-reward calculated in Python, never from Claude.
     risk = abs(entry - stop)
     reward = abs(target - entry)
     risk_reward = round(reward / risk, 2) if risk > 0 else 0.0
@@ -236,18 +238,20 @@ def synthesise_recommendation(
     }
 
 
-def synthesise_all(symbols_signals: Dict[str, Dict[str, Any]], user_config: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
-    """
-    Generate synthesis recommendations for multiple symbols.
-
-    Adds a 1 second delay between API calls to reduce rate-limit risk.
-    Continues processing even if one symbol fails.
-    """
-
+def synthesise_all(
+    symbols_signals: Dict[str, Dict[str, Any]],
+    user_config: Dict[str, Any],
+    regime_context: str = "",
+) -> Dict[str, Dict[str, Any]]:
     output: Dict[str, Dict[str, Any]] = {}
     for symbol, signal in symbols_signals.items():
         try:
-            output[symbol] = synthesise_recommendation(symbol, signal, user_config)
+            output[symbol] = synthesise_recommendation(
+                symbol,
+                signal,
+                user_config,
+                regime_context=regime_context,
+            )
         except Exception as exc:
             logger.error("synthesise_all failed for %s: %s", symbol, exc)
             output[symbol] = _fallback_skip(symbol, signal, f"Synthesis failed: {exc}")
@@ -256,12 +260,6 @@ def synthesise_all(symbols_signals: Dict[str, Dict[str, Any]], user_config: Dict
 
 
 def format_morning_briefing(all_recommendations: Dict[str, Dict[str, Any]], user_config: Dict[str, Any]) -> str:
-    """
-    Format a morning briefing text from synthesized recommendations.
-
-    Includes recommended trades, watchlist-only symbols, and skipped symbols.
-    """
-
     now = datetime.now(IST)
     dt_label = now.strftime("%d-%m-%Y %H:%M")
 
@@ -279,16 +277,14 @@ def format_morning_briefing(all_recommendations: Dict[str, Dict[str, Any]], user
     ]
 
     for rec in recs:
-        lines.extend(
-            [
-                f"📈 {rec.get('symbol')} — {rec.get('action')} ({rec.get('confidence')} confidence)",
-                f"Entry: Rs.{rec.get('entry_price')} | Target: Rs.{rec.get('target')} | SL: Rs.{rec.get('stop_loss')}",
-                f"Hold: {rec.get('hold_period')} | R:R = {rec.get('risk_reward')}",
-                str(rec.get("reasoning", "")),
-                f"⚠️ Risk: {rec.get('risk_factors')}",
-                "",
-            ]
-        )
+        lines.extend([
+            f"📈 {rec.get('symbol')} — {rec.get('action')} ({rec.get('confidence')} confidence)",
+            f"Entry: Rs.{rec.get('entry_price')} | Target: Rs.{rec.get('target')} | SL: Rs.{rec.get('stop_loss')}",
+            f"Hold: {rec.get('hold_period')} | R:R = {rec.get('risk_reward')}",
+            str(rec.get("reasoning", "")),
+            f"⚠️ Risk: {rec.get('risk_factors')}",
+            "",
+        ])
 
     lines.append(f"👀 WATCHLIST ({len(watchs)} stocks)")
     for rec in watchs:
@@ -300,4 +296,3 @@ def format_morning_briefing(all_recommendations: Dict[str, Dict[str, Any]], user
         lines.append(f"- {rec.get('symbol')}: {rec.get('reasoning', '')}")
 
     return "\n".join(lines).strip()
-
