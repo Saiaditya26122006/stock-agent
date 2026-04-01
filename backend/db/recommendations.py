@@ -7,8 +7,10 @@ Works with the `recommendations_log` table.
 from __future__ import annotations
 
 import logging
-from datetime import date
+from datetime import date, datetime
 from typing import Any, Dict, List
+
+import pytz
 
 from db.supabase_client import supabase_client
 
@@ -26,12 +28,6 @@ VALID_OUTCOMES = {
 
 
 def _safe_response_single(resp: Any, context: str) -> List[Dict[str, Any]]:
-    """
-    Extract data list from a Supabase response for read operations.
-
-    Logs any errors and returns [] on failure.
-    """
-
     try:
         error = getattr(resp, "error", None)
         if error:
@@ -43,23 +39,12 @@ def _safe_response_single(resp: Any, context: str) -> List[Dict[str, Any]]:
         if isinstance(data, list):
             return data
         return [data]
-    except Exception as exc:  # pragma: no cover - defensive
+    except Exception as exc:
         logger.error("%s unexpected response handling error: %s", context, exc)
         return []
 
 
 def log_recommendation(rec_dict: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Insert a new recommendation row into `recommendations_log`.
-
-    Required keys in rec_dict:
-        user_id, date, stock, style, entry_price, target, stop_loss,
-        risk_score, sentiment_score
-
-    Returns:
-        {success: bool, id: str|None, message: str}
-    """
-
     required = {
         "user_id",
         "date",
@@ -79,7 +64,9 @@ def log_recommendation(rec_dict: Dict[str, Any]) -> Dict[str, Any]:
             "message": f"Missing required recommendation fields: {', '.join(missing)}",
         }
 
-    payload = {k: rec_dict[k] for k in rec_dict if k in required}
+    optional = {"reasoning", "hold_period", "action", "confidence"}
+    allowed = required | optional
+    payload = {k: rec_dict[k] for k in rec_dict if k in allowed}
 
     try:
         resp = supabase_client.table("recommendations_log").insert(payload).execute()
@@ -107,15 +94,9 @@ def log_recommendation(rec_dict: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def get_todays_recommendations(user_id: str = "sai_aditya") -> List[Dict[str, Any]]:
-    """
-    Fetch all recommendations for today's date for a given user.
-
-    Returns:
-        List of recommendation dicts; [] if none or on error.
-    """
-
-    ist = __import__("pytz").timezone("Asia/Kolkata")
-    today = __import__("datetime").datetime.now(ist).date().isoformat()
+    import pytz
+    ist = pytz.timezone('Asia/Kolkata')
+    today = __import__('datetime').datetime.now(ist).date().isoformat()
     try:
         resp = (
             supabase_client.table("recommendations_log")
@@ -138,20 +119,6 @@ def update_outcome(
     pnl: float,
     agent_correct: bool,
 ) -> Dict[str, Any]:
-    """
-    Update the outcome fields for a specific recommendation.
-
-    Args:
-        rec_id: UUID of the recommendation row.
-        outcome: One of VALID_OUTCOMES.
-        actual_exit: Exit price.
-        pnl: Profit/loss for the recommendation.
-        agent_correct: Whether the agent's call was correct.
-
-    Returns:
-        {success: bool, message: str}
-    """
-
     if outcome not in VALID_OUTCOMES:
         return {
             "success": False,
@@ -191,21 +158,6 @@ def update_outcome(
 
 
 def get_win_rate(user_id: str = "sai_aditya", last_n: int = 20) -> Dict[str, Any]:
-    """
-    Calculate win rate over the last N closed recommendations.
-
-    Closed recommendations:
-        outcome is not null and not 'still_open'.
-
-    Returns:
-        {
-            win_rate: float (0-100, rounded to 2 decimals),
-            total: int,
-            wins: int,
-            losses: int,
-        }
-    """
-
     try:
         resp = (
             supabase_client.table("recommendations_log")
@@ -242,4 +194,3 @@ def get_win_rate(user_id: str = "sai_aditya", last_n: int = 20) -> Dict[str, Any
         "wins": wins,
         "losses": losses,
     }
-

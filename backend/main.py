@@ -37,7 +37,7 @@ IST = ZoneInfo("Asia/Kolkata")
 app = FastAPI(title="Stock Agent API", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=["http://localhost:5173", "http://localhost:5174", "http://localhost:5175", "http://localhost:5176", "http://localhost:5177"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -282,6 +282,10 @@ def run_analysis(req: Optional[RunAnalysisRequest] = None) -> Dict[str, Any]:
                 "stop_loss": rec.get("stop_loss", 0.0),
                 "risk_score": (signal.get("atr") or {}).get("pct_of_price", 0.0) or 0.0,
                 "sentiment_score": 0.0,
+                "action": rec.get("action", "SKIP"),
+                "reasoning": rec.get("reasoning", ""),
+                "hold_period": rec.get("hold_period", "N/A"),
+                "confidence": rec.get("confidence", "LOW"),
             }
             log_res = log_recommendation(rec_payload)
             if not log_res.get("success"):

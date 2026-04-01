@@ -119,11 +119,6 @@ class UpstoxClient:
         headers: Optional[Dict[str, str]] = None,
         retryable: Optional[Callable[[httpx.Response], bool]] = None,
     ) -> httpx.Response:
-        """
-        Perform an HTTP request with up to 3 attempts and 2s delay on transient errors.
-
-        Retries on connection errors, timeouts, HTTP 429, and 5xx unless overridden.
-        """
         if retryable is None:
             retryable = lambda r: r.status_code in (429, 500, 502, 503, 504)
 
@@ -165,7 +160,6 @@ class UpstoxClient:
         raise RuntimeError(f"{context}: HTTP {resp.status_code} — {msg}")
 
     def get_profile(self) -> dict:
-        """Call GET /user/profile (connectivity / identity check)."""
         url = f"{self.base_url}/user/profile"
         resp = self.request("GET", url, context="User profile")
         self._raise_http(resp, "User profile")
@@ -181,13 +175,10 @@ class UpstoxClient:
         to_date: date,
         from_date: date,
     ) -> List[List[Any]]:
-        """Fetch historical candles via v2 (day, week, 1minute, 30minute)."""
         enc = _encode_instrument_key(instrument_key)
         to_s = to_date.isoformat()
         from_s = from_date.isoformat()
-        url = (
-            f"{self.base_url}/historical-candle/{enc}/{interval}/{to_s}/{from_s}"
-        )
+        url = f"{self.base_url}/historical-candle/{enc}/{interval}/{to_s}/{from_s}"
         resp = self.request("GET", url, context="Historical candles (v2)")
         self._raise_http(resp, "Historical candles (v2)")
         body = resp.json()
@@ -204,7 +195,6 @@ class UpstoxClient:
         to_date: date,
         from_date: date,
     ) -> List[List[Any]]:
-        """Fetch historical candles via v3 (minutes/hours granular units)."""
         enc = _encode_instrument_key(instrument_key)
         to_s = to_date.isoformat()
         from_s = from_date.isoformat()
@@ -219,7 +209,6 @@ class UpstoxClient:
         return data.get("candles") or []
 
     def get_full_quotes(self, instrument_key: str) -> dict:
-        """GET /market-quote/quotes for one instrument."""
         enc = quote(instrument_key, safe="")
         url = f"{self.base_url}/market-quote/quotes?instrument_key={enc}"
         resp = self.request("GET", url, context="Market quote")
@@ -230,20 +219,17 @@ class UpstoxClient:
         data = body.get("data") or {}
         if not isinstance(data, dict):
             raise RuntimeError("Market quote: response data is not an object.")
-        # Match by instrument_token when possible
         for _k, payload in data.items():
             if not isinstance(payload, dict):
                 continue
             if payload.get("instrument_token") == instrument_key:
                 return payload
-        # Fallback: single instrument response — first entry
         for payload in data.values():
             if isinstance(payload, dict):
                 return payload
         raise RuntimeError("Market quote: no quote returned for this instrument.")
 
     def get_holdings(self) -> List[dict]:
-        """GET /portfolio/long-term-holdings."""
         url = f"{self.base_url}/portfolio/long-term-holdings"
         resp = self.request("GET", url, context="Holdings")
         self._raise_http(resp, "Holdings")
@@ -278,7 +264,10 @@ def get_instrument_key(symbol: str) -> str:
 
     Resolution order:
     1) Fast path from INSTRUMENT_KEYS dict.
-    2) Upstox instrument search API lookup, exact NSE_EQ + trading_symbol match.
+    2) Upstox instrument search API — matches on instrument_key starting with
+       'NSE_EQ|' AND exact trading_symbol match (case-insensitive).
+       Note: the search API returns exchange as 'NSE' not 'NSE_EQ', so we
+       match on instrument_key prefix instead.
     3) Raise unknown-symbol ValueError if no mapping found.
     """
     key = symbol.strip().upper()
@@ -309,17 +298,11 @@ def get_instrument_key(symbol: str) -> str:
     for row in data:
         if not isinstance(row, dict):
             continue
-        if row.get("exchange") != "NSE_EQ":
-            continue
-        trading_symbol = str(row.get("trading_symbol") or "").strip().upper()
-        if trading_symbol != key:
-            continue
         instrument_key = str(row.get("instrument_key") or "").strip()
-        if not instrument_key:
-            continue
-        # Cache for this process so repeat lookups are instant.
-        INSTRUMENT_KEYS[key] = instrument_key
-        return instrument_key
+        trading_symbol = str(row.get("trading_symbol") or "").strip().upper()
+        if instrument_key.startswith("NSE_EQ|") and trading_symbol == key:
+            INSTRUMENT_KEYS[key] = instrument_key
+            return instrument_key
 
     raise ValueError(
         f"Unknown symbol {symbol!r}: add it to INSTRUMENT_KEYS or use a mapped ticker."
@@ -327,18 +310,6 @@ def get_instrument_key(symbol: str) -> str:
 
 
 def get_historical_ohlcv(symbol: str, interval: str, days: int) -> pd.DataFrame:
-    """
-    Fetch historical OHLCV for an NSE equity symbol.
-
-    Args:
-        symbol: NSE symbol (e.g. 'RELIANCE'); must exist in INSTRUMENT_KEYS.
-        interval: '5minute', '15minute', '1hour', 'day', or 'week'.
-        days: Calendar span to request (from_date = to_date - days).
-
-    Returns:
-        DataFrame columns: date, open, high, low, close, volume — date sorted ascending,
-        timezone-aware datetimes in Asia/Kolkata.
-    """
     if days < 1:
         raise ValueError("days must be at least 1.")
     if interval not in _ALLOWED_INTERVALS:
@@ -351,7 +322,6 @@ def get_historical_ohlcv(symbol: str, interval: str, days: int) -> pd.DataFrame:
     to_d = datetime.now(IST).date()
     from_d = to_d - timedelta(days=days)
 
-    # v2 supports day/week directly; intraday granularities use v3 (minutes/hours).
     if interval == "day":
         candles = client.get_historical_candles_v2(ik, "day", to_d, from_d)
     elif interval == "week":
@@ -384,16 +354,6 @@ def get_historical_ohlcv(symbol: str, interval: str, days: int) -> pd.DataFrame:
 
 
 def get_live_quote(symbol: str) -> Dict[str, Any]:
-    """
-    Fetch the latest full market quote for a symbol.
-
-    Args:
-        symbol: NSE ticker present in INSTRUMENT_KEYS.
-
-    Returns:
-        Dict with symbol, last_price, open, high, low, close, volume,
-        change, change_pct, timestamp (ISO string in IST).
-    """
     client = _get_client()
     ik = _resolve_instrument_key(symbol)
     q = client.get_full_quotes(ik)
@@ -442,12 +402,6 @@ def get_live_quote(symbol: str) -> Dict[str, Any]:
 
 
 def get_portfolio() -> List[Dict[str, Any]]:
-    """
-    Fetch long-term demat holdings from the linked Upstox account.
-
-    Returns:
-        List of dicts: symbol, quantity, avg_price, current_price, pnl, pnl_pct.
-    """
     client = _get_client()
     raw = client.get_holdings()
     out: List[Dict[str, Any]] = []
@@ -462,32 +416,18 @@ def get_portfolio() -> List[Dict[str, Any]]:
         else:
             pnl_pct = 0.0
         sym = str(row.get("trading_symbol") or row.get("tradingsymbol") or "")
-        out.append(
-            {
-                "symbol": sym,
-                "quantity": qty,
-                "avg_price": avg,
-                "current_price": cur,
-                "pnl": pnl,
-                "pnl_pct": pnl_pct,
-            }
-        )
+        out.append({
+            "symbol": sym,
+            "quantity": qty,
+            "avg_price": avg,
+            "current_price": cur,
+            "pnl": pnl,
+            "pnl_pct": pnl_pct,
+        })
     return out
 
 
 def freshness_check(df: pd.DataFrame) -> Dict[str, Any]:
-    """
-    Validate recency of OHLCV data for technical analysis safety.
-
-    Args:
-        df: DataFrame from get_historical_ohlcv with a 'date' column.
-
-    Returns:
-        { 'is_fresh': bool, 'last_date': str (YYYY-MM-DD), 'message': str }
-
-    Raises:
-        DataFreshnessError: If the latest candle is more than 2 calendar days old.
-    """
     if df is None or df.empty:
         raise DataFreshnessError("No candles in DataFrame — cannot assess freshness.")
     if "date" not in df.columns:
@@ -535,12 +475,6 @@ def freshness_check(df: pd.DataFrame) -> Dict[str, Any]:
 
 
 def test_connection() -> bool:
-    """
-    Verify API connectivity by calling the market quote endpoint.
-
-    Returns:
-        True if GET /market-quote/quotes returns HTTP 200; False otherwise.
-    """
     try:
         client = _get_client()
         instrument_key = INSTRUMENT_KEYS["RELIANCE"]
