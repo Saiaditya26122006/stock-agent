@@ -23,12 +23,14 @@ from analysis.feasibility import check_target_feasibility, get_india_vix, get_ma
 from analysis.position_sizing import calculate_position_size
 from analysis.risk_scorer import compute_risk_score, should_skip_stock
 from analysis.sentiment import get_sentiment_batch
+from analysis.special_days import check_special_day, get_full_premarket_context
 from analysis.market_regime import (
     apply_regime_to_position,
     filter_by_regime,
     get_regime_config,
     get_regime_prompt_injection,
 )
+from data.nse import get_gift_nifty
 from data.upstox import get_historical_ohlcv, test_connection as test_upstox_connection
 from db.recommendations import (
     get_todays_recommendations,
@@ -212,6 +214,7 @@ def run_analysis(req: Optional[RunAnalysisRequest] = None) -> Dict[str, Any]:
     skipped_symbols: List[Dict[str, str]] = []
     feasibility_result: Dict[str, Any] = {}
     regime_config: Dict[str, Any] = get_regime_config(15.0)
+    premarket_context: Dict[str, Any] = {}
     india_vix = 15.0
     market_regime = "NORMAL"
     try:
@@ -230,6 +233,23 @@ def run_analysis(req: Optional[RunAnalysisRequest] = None) -> Dict[str, Any]:
             india_vix = 15.0
             market_regime = "NORMAL"
             regime_config = get_regime_config(india_vix)
+        try:
+            gift_nifty_data = get_gift_nifty()
+            premarket_context = get_full_premarket_context(gift_nifty_data)
+            gift_info = premarket_context.get("gift_nifty", {})
+            logger.info(
+                "Gift Nifty: %+0.2f%% | Signal: %s",
+                float(gift_info.get("pct_change", 0.0)),
+                gift_info.get("signal", "neutral"),
+            )
+            special = premarket_context.get("special_day", {})
+            event_name = special.get("event") or "No special events"
+            logger.info("Special day check: %s", event_name)
+            if special.get("is_special_day"):
+                logger.warning("Special day active: %s", event_name)
+        except Exception as exc:
+            logger.error("Premarket context build failed: %s", exc)
+            premarket_context = get_full_premarket_context({})
 
         for symbol in symbols:
             try:
@@ -342,6 +362,35 @@ def run_analysis(req: Optional[RunAnalysisRequest] = None) -> Dict[str, Any]:
                         sizing_result = apply_regime_to_position(sizing_result, regime_config)
                     except Exception as regime_exc:
                         logger.error("Regime override failed for %s: %s", symbol, regime_exc)
+                    try:
+                        modifier = float(premarket_context.get("combined_position_modifier", 1.0))
+                        if sizing_result.get("action") == "trade":
+                            scaled_shares = int(float(sizing_result.get("shares", 0)) * modifier)
+                            scaled_shares = int(scaled_shares)  # ensure integer floor semantics
+                            if scaled_shares <= 0:
+                                sizing_result = {
+                                    "action": "skip",
+                                    "shares": 0,
+                                    "position_value": 0.0,
+                                    "risk_amount": 0.0,
+                                    "risk_pct_used": 0.0,
+                                    "entry_price": float(sizing_result.get("entry_price", 0.0)),
+                                    "stop_loss": float(sizing_result.get("stop_loss", 0.0)),
+                                    "capital": float(sizing_result.get("capital", 0.0)),
+                                    "capital_at_risk_pct": 0.0,
+                                    "reason": "premarket_modifier_reduced_position_to_zero",
+                                    "premarket_modifier": modifier,
+                                }
+                            else:
+                                entry_p = float(sizing_result.get("entry_price", 0.0))
+                                cap = float(sizing_result.get("capital", 0.0))
+                                pos_val = round(scaled_shares * entry_p, 2)
+                                sizing_result["shares"] = scaled_shares
+                                sizing_result["position_value"] = pos_val
+                                sizing_result["capital_at_risk_pct"] = round((pos_val / cap) * 100.0, 2) if cap > 0 else 0.0
+                                sizing_result["premarket_modifier"] = modifier
+                    except Exception as pm_exc:
+                        logger.error("Premarket modifier apply failed for %s: %s", symbol, pm_exc)
                     rec["position_sizing"] = sizing_result
                     logger.info("Position size computed for %s: %s", symbol, sizing_result.get("reason"))
                     if sizing_result.get("action") == "skip":
@@ -436,6 +485,7 @@ def run_analysis(req: Optional[RunAnalysisRequest] = None) -> Dict[str, Any]:
             "risk_scores": risk_score_results,
             "feasibility": feasibility_result,
             "regime_config": regime_config,
+            "premarket_context": premarket_context,
             "skipped_symbols": skipped_symbols,
             "errors": errors,
         }

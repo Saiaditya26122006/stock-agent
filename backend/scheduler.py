@@ -63,7 +63,7 @@ def _derive_morning_payload(run_data: Dict[str, Any]) -> Dict[str, Any]:
         rec_copy = dict(rec)
         rec_copy.setdefault("symbol", symbol)
         rec_copy.setdefault("risk_score", 5)
-        if rec_copy.get("action") in {"BUY", "SELL", "WATCH", "SKIP"}:
+        if rec_copy.get("action") in {"BUY", "SELL", "WATCH"}:
             recommendations_list.append(rec_copy)
         else:
             skipped_stocks.append({"symbol": symbol, "reason": rec_copy.get("reasoning", "No clear setup.")})
@@ -118,6 +118,9 @@ async def morning_analysis_job() -> None:
             market_mood=payload["market_mood"],
             market_regime=str(run_data.get("market_regime") or payload["market_mood"]),
             india_vix=float(run_data.get("india_vix", payload.get("india_vix", 15.0))),
+            special_day_alert=str(
+                ((run_data.get("premarket_context") or {}).get("morning_alert") or "")
+            ).strip(),
         )
         _log_scheduler_run(
             job_name="morning_analysis_job",

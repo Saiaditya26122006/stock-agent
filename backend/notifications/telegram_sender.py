@@ -72,6 +72,7 @@ def send_morning_briefing_telegram(
     market_mood: str,
     market_regime: str | None = None,
     india_vix: float | None = None,
+    special_day_alert: str | None = None,
 ) -> bool:
     """Format and send a mobile-friendly morning Telegram briefing."""
     try:
@@ -93,6 +94,8 @@ def send_morning_briefing_telegram(
             f"📊 Market: {regime} | VIX: {vix_label}",
             "──────────────────",
         ]
+        if special_day_alert:
+            lines.extend([str(special_day_alert), "──────────────────"])
         for rec in actionable:
             symbol = rec.get("symbol", "UNKNOWN")
             action = rec.get("action", "WATCH")
