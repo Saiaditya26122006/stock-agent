@@ -17,3 +17,4 @@ jinja2
 pytz
 pytest
 websockets
+brotli
