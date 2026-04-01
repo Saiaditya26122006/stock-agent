@@ -9,8 +9,8 @@ import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
+from zoneinfo import ZoneInfo
 
-import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
@@ -22,7 +22,7 @@ from notifications.telegram_sender import send_alert, send_message, send_morning
 
 
 logger = logging.getLogger(__name__)
-IST = pytz.timezone("Asia/Kolkata")
+IST = ZoneInfo("Asia/Kolkata")
 _SCHEDULER: AsyncIOScheduler | None = None
 
 
@@ -63,7 +63,7 @@ def _derive_morning_payload(run_data: Dict[str, Any]) -> Dict[str, Any]:
         rec_copy = dict(rec)
         rec_copy.setdefault("symbol", symbol)
         rec_copy.setdefault("risk_score", 5)
-        if rec_copy.get("action") in {"BUY", "SELL", "WATCH"}:
+        if rec_copy.get("action") in {"BUY", "SELL", "WATCH", "SKIP"}:
             recommendations_list.append(rec_copy)
         else:
             skipped_stocks.append({"symbol": symbol, "reason": rec_copy.get("reasoning", "No clear setup.")})
@@ -116,6 +116,8 @@ async def morning_analysis_job() -> None:
         tg_ok = send_morning_briefing_telegram(
             recommendations=payload["recommendations"],
             market_mood=payload["market_mood"],
+            market_regime=str(run_data.get("market_regime") or payload["market_mood"]),
+            india_vix=float(run_data.get("india_vix", payload.get("india_vix", 15.0))),
         )
         _log_scheduler_run(
             job_name="morning_analysis_job",

@@ -81,7 +81,7 @@ def calculate_position_size(
         position_value = shares * entry
 
         # Hard cap 3: max 2% capital per trade
-        max_position_value = cap * 0.02
+        max_position_value = cap * risk_pct * 10
         if position_value > max_position_value:
             shares = math.floor(max_position_value / entry)
             position_value = shares * entry

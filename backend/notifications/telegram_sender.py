@@ -67,7 +67,12 @@ def _run_async(coro: Any) -> bool:
         return executor.submit(lambda: asyncio.run(coro)).result()
 
 
-def send_morning_briefing_telegram(recommendations: list, market_mood: str) -> bool:
+def send_morning_briefing_telegram(
+    recommendations: list,
+    market_mood: str,
+    market_regime: str | None = None,
+    india_vix: float | None = None,
+) -> bool:
     """Format and send a mobile-friendly morning Telegram briefing."""
     try:
         now_label = datetime.now(IST).strftime("%d %b %Y")
@@ -81,10 +86,23 @@ def send_morning_briefing_telegram(recommendations: list, market_mood: str) -> b
             else:
                 skipped.append(rec.get("symbol", "UNKNOWN"))
 
-        lines = [f"🌅 MORNING BRIEFING — {now_label} {mood_emoji} {market_mood.upper()}", "──────────────────"]
+        regime = (market_regime or market_mood or "NORMAL").upper()
+        vix_label = f"{float(india_vix):.2f}" if india_vix is not None else "N/A"
+        lines = [
+            f"🌅 MORNING BRIEFING — {now_label} {mood_emoji} {market_mood.upper()}",
+            f"📊 Market: {regime} | VIX: {vix_label}",
+            "──────────────────",
+        ]
         for rec in actionable:
             symbol = rec.get("symbol", "UNKNOWN")
             action = rec.get("action", "WATCH")
+            sent_val = float(rec.get("sentiment_score", 0.0) or 0.0)
+            if sent_val > 0.15:
+                sent_label = "😊 Positive"
+            elif sent_val < -0.15:
+                sent_label = "😟 Negative"
+            else:
+                sent_label = "😐 Neutral"
             lines.extend(
                 [
                     f"📈 {symbol} — {action}",
@@ -94,9 +112,10 @@ def send_morning_briefing_telegram(recommendations: list, market_mood: str) -> b
                         f"SL: Rs.{rec.get('stop_loss', 0)}"
                     ),
                     (
-                        f"Risk Score: {rec.get('risk_score', 0)}/10 | "
-                        f"Hold: {rec.get('hold_period', 'N/A')}"
+                        f"Risk: {rec.get('risk_score', 0)}/10 | "
+                        f"Sentiment: {sent_label}"
                     ),
+                    f"Hold: {rec.get('hold_period', 'N/A')}",
                     "──────────────────",
                 ]
             )
