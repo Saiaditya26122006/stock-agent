@@ -23,14 +23,15 @@ from analysis.feasibility import check_target_feasibility, get_india_vix, get_ma
 from analysis.position_sizing import calculate_position_size
 from analysis.risk_scorer import compute_risk_score, should_skip_stock
 from analysis.sentiment import get_sentiment_batch
-from analysis.special_days import check_special_day, get_full_premarket_context
+from analysis.special_days import get_full_premarket_context
 from analysis.market_regime import (
     apply_regime_to_position,
     filter_by_regime,
     get_regime_config,
     get_regime_prompt_injection,
 )
-from data.nse import get_gift_nifty
+from analysis.gates import run_all_gates
+from data.nse import get_circuit_filter_status, get_gift_nifty, get_nse_announcements
 from data.upstox import get_historical_ohlcv, test_connection as test_upstox_connection
 from db.recommendations import (
     get_todays_recommendations,
@@ -38,7 +39,7 @@ from db.recommendations import (
     log_recommendation,
 )
 from db.supabase_client import supabase_client, test_connection as test_supabase_connection
-from db.watchlist import add_symbol, get_active_watchlist, get_symbols_list, remove_symbol
+from db.watchlist import add_symbol, get_active_watchlist, get_symbols_list, get_watchlist_by_sector, remove_symbol
 from scheduler import get_scheduler_status, init_scheduler, morning_analysis_job, trigger_morning_now
 
 
@@ -49,7 +50,18 @@ IST = ZoneInfo("Asia/Kolkata")
 app = FastAPI(title="Stock Agent API", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://localhost:5174",
+        "http://localhost:5175",
+        "http://localhost:5176",
+        "http://localhost:5177",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:5174",
+        "http://127.0.0.1:5175",
+        "http://127.0.0.1:5176",
+        "http://127.0.0.1:5177",
+    ],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -66,6 +78,7 @@ class ErrorResponse(BaseModel):
 
 class AddWatchlistRequest(BaseModel):
     symbol: str
+    sector: str = "Uncategorised"
     exchange: str = "NSE"
     user_id: str = "sai_aditya"
 
@@ -181,9 +194,14 @@ def watchlist(user_id: str = "sai_aditya") -> Dict[str, Any]:
     return {"symbols": rows, "count": len(rows)}
 
 
+@app.get("/watchlist/by-sector", status_code=200, response_model=Dict[str, Any])
+def watchlist_by_sector(user_id: str = "sai_aditya") -> Dict[str, Any]:
+    return get_watchlist_by_sector(user_id=user_id)
+
+
 @app.post("/watchlist/add", status_code=200, response_model=Dict[str, Any])
 def watchlist_add(req: AddWatchlistRequest) -> Dict[str, Any]:
-    result = add_symbol(symbol=req.symbol, exchange=req.exchange, user_id=req.user_id)
+    result = add_symbol(symbol=req.symbol, exchange=req.exchange, user_id=req.user_id, sector=req.sector)
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("message", "Failed to add symbol."))
     return result
@@ -310,9 +328,33 @@ def run_analysis(req: Optional[RunAnalysisRequest] = None) -> Dict[str, Any]:
                 skipped_symbols.append({"symbol": symbol, "reason": reason})
                 logger.info("Skipped %s at pre-trade gate: %s", symbol, reason)
             else:
-                filtered_signals[symbol] = signal
+                # Run 5-gate pre-trade validation
+                try:
+                    circuit_data = get_circuit_filter_status(symbol)
+                except Exception as _gate_nse_exc:
+                    logger.warning("Circuit status fetch failed for %s: %s", symbol, _gate_nse_exc)
+                    circuit_data = {}
+                try:
+                    announcements = get_nse_announcements(symbol)
+                except Exception as _gate_ann_exc:
+                    logger.warning("Announcements fetch failed for %s: %s", symbol, _gate_ann_exc)
+                    announcements = []
+                sym_sent_for_gate = float((sentiment_results.get(symbol) or {}).get("sentiment_score", 0.0))
+                gate_result = run_all_gates(
+                    symbol=symbol,
+                    signal_dict=signal,
+                    sentiment_score=sym_sent_for_gate,
+                    circuit_data=circuit_data,
+                    announcements=announcements,
+                )
+                if gate_result.get("hard_failure"):
+                    reason = gate_result.get("failure_reason", "pre_trade_gate_hard_fail")
+                    skipped_symbols.append({"symbol": symbol, "reason": reason})
+                    logger.info("Skipped %s: gate hard failure — %s", symbol, reason)
+                else:
+                    filtered_signals[symbol] = signal
 
-        analysed = len(results)
+        analysed = len(symbols)
         user_config = get_user_config(user_id=req.user_id)
         regime_context = get_regime_prompt_injection(regime_config)
         recommendations = synthesise_all(
@@ -471,6 +513,36 @@ def run_analysis(req: Optional[RunAnalysisRequest] = None) -> Dict[str, Any]:
                 recommendations_count=actionable_count,
             )
 
+            if actionable_count == 0:
+                try:
+                    from notifications.telegram_sender import _run_async, send_message as send_telegram_message
+                    from notifications.email_sender import _send_html_email as send_email
+
+                    date_str = _now_ist().strftime("%d %b %Y")
+                    tg_msg = (
+                        f"🔴 NO TRADES TODAY — {date_str}\n"
+                        f"Market: {market_regime} | VIX: {india_vix:.2f}\n\n"
+                        f"All {analysed} stocks skipped — no setups met the minimum risk score threshold for current market conditions.\n\n"
+                        "💡 Agent is protecting your capital. Check back tomorrow."
+                    )
+                    _run_async(send_telegram_message(tg_msg))
+
+                    email_subject = f"🔴 No Trades Today — {date_str} | Agent Protecting Capital"
+                    email_body = f"""<html>
+                    <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+                        <h2 style="color: #dc2626;">No Trades Today — {date_str}</h2>
+                        <p><strong>Market Regime:</strong> {market_regime}</p>
+                        <p><strong>VIX Level:</strong> {india_vix:.2f}</p>
+                        <p><strong>Stocks Analysed:</strong> {analysed}</p>
+                        <p><strong>Reason:</strong> All {analysed} stocks skipped — no setups met the minimum risk score threshold for current market conditions.</p>
+                        <hr style="border: 0; border-top: 1px solid #eee; margin: 20px 0;" />
+                        <p>💡 <em>Agent is protecting your capital. The morning analysis pipeline ran successfully and completed evaluating all configured watchlist stocks. Check back tomorrow for new opportunities.</em></p>
+                    </body>
+                    </html>"""
+                    send_email(html_content=email_body, subject=email_subject)
+                except Exception as exc:
+                    logger.error("Failed to push zero-trade notification: %s", exc)
+
         return {
             "run_id": run_id,
             "timestamp": _now_ist().isoformat(),
@@ -526,3 +598,85 @@ async def scheduler_trigger_morning() -> Dict[str, Any]:
     except Exception as exc:
         logger.error("Manual morning trigger failed: %s", exc)
         raise HTTPException(status_code=500, detail=f"Failed to trigger morning job: {exc}") from exc
+
+
+# ---------------------------------------------------------------------------
+# Backtester endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/backtest/{symbol}", status_code=200, response_model=Dict[str, Any])
+def run_backtest_endpoint(symbol: str, lookback_days: int = 730) -> Dict[str, Any]:
+    """Run vectorbt backtest for a symbol and return full result. Results are cached 24 h."""
+    try:
+        from analysis.backtester import run_backtest
+        result = run_backtest(symbol=symbol.upper(), lookback_days=lookback_days)
+        return result.to_dict()
+    except Exception as exc:
+        logger.error("Backtest endpoint failed for %s: %s", symbol, exc)
+        raise HTTPException(status_code=500, detail=f"Backtest failed: {exc}") from exc
+
+
+@app.get("/backtest/results", status_code=200, response_model=Dict[str, Any])
+def get_backtest_results() -> Dict[str, Any]:
+    """Return all currently cached backtest results (keyed by symbol)."""
+    try:
+        from analysis.backtester import get_all_cached_results
+        return get_all_cached_results()
+    except Exception as exc:
+        logger.error("get_backtest_results failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"Failed to fetch cached results: {exc}") from exc
+
+
+# ---------------------------------------------------------------------------
+# Outcome logger endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/outcomes/log-today", status_code=200, response_model=Dict[str, Any])
+def log_outcomes_today(user_id: str = "sai_aditya") -> Dict[str, Any]:
+    """Manually trigger outcome logger for today's open recommendations."""
+    try:
+        from db.outcome_logger import run_outcome_logger
+        from notifications.eod_report import send_eod_report
+        
+        # Log outcomes
+        summary = run_outcome_logger(user_id=user_id)
+        
+        # Trigger EOD report
+        report = send_eod_report(daily_summary=summary)
+        
+        return {
+            "summary": summary,
+            "report_generated": report is not None
+        }
+    except Exception as exc:
+        logger.error("log_outcomes_today endpoint failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"Outcome logging failed: {exc}") from exc
+
+@app.get("/eod/latest", status_code=200, response_model=Dict[str, Any])
+def get_latest_eod(user_id: str = "sai_aditya") -> Dict[str, Any]:
+    """Return the most recent EOD report summary based on today's logs."""
+    try:
+        from db.outcome_logger import run_outcome_logger, get_outcomes_summary
+        
+        # Use idempotent outcome logger run to get today's state safely
+        daily_summary = run_outcome_logger(user_id=user_id)
+        rolling_summary = get_outcomes_summary(user_id=user_id, last_days=30)
+        
+        return {
+            "today": daily_summary,
+            "rolling_30_day": rolling_summary
+        }
+    except Exception as exc:
+        logger.error("get_latest_eod endpoint failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"Latest EOD fetch failed: {exc}") from exc
+
+
+@app.get("/outcomes/summary", status_code=200, response_model=Dict[str, Any])
+def outcomes_summary(user_id: str = "sai_aditya", last_days: int = 30) -> Dict[str, Any]:
+    """Return aggregate outcome stats for the last N days."""
+    try:
+        from db.outcome_logger import get_outcomes_summary
+        return get_outcomes_summary(user_id=user_id, last_days=last_days)
+    except Exception as exc:
+        logger.error("outcomes_summary endpoint failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"Summary fetch failed: {exc}") from exc

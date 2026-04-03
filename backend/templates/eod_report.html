@@ -1,0 +1,109 @@
+<!doctype html>
+<html>
+  <body style="margin:0; padding:0; background:#f3f4f6; font-family:Arial, sans-serif; color:#111827;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f3f4f6; padding:20px 0;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="600" cellspacing="0" cellpadding="0" style="max-width:600px; width:100%; background:#ffffff; border-radius:12px; overflow:hidden;">
+            <tr>
+              <td style="background:#111827; padding:18px 20px;">
+                <div style="font-size:18px; font-weight:700; color:#ffffff;">NSE/BSE AI End of Day Report</div>
+                <div style="font-size:13px; color:#d1d5db; margin-top:6px;">{{ date }}</div>
+                {% if paper_mode %}
+                <div style="margin-top:10px; display:inline-block; background:#f59e0b; color:#ffffff; font-weight:700; font-size:12px; padding:6px 10px; border-radius:999px;">
+                  PAPER MODE ACTIVE
+                </div>
+                {% endif %}
+              </td>
+            </tr>
+
+            <tr>
+              <td style="padding:16px 20px 4px 20px;">
+                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f9fafb; border-radius:10px; border:1px solid #e5e7eb;">
+                  <tr>
+                    <td style="padding:12px;">
+                      <div style="font-size:14px; font-weight:700; color:#111827; margin-bottom:8px;">Market Summary</div>
+                      <div style="font-size:13px; color:#374151;">Market Regime: <strong>{{ market_regime }}</strong></div>
+                      <div style="font-size:13px; color:#374151;">Total Trades: <strong>{{ total_recommendations }}</strong></div>
+                      <div style="font-size:13px; color:#374151;">Wins: <strong>{{ wins }}</strong> | Losses: <strong>{{ losses }}</strong></div>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+
+            <tr>
+              <td style="padding:16px 20px 4px 20px;">
+                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f9fafb; border-radius:10px; border:1px solid #e5e7eb;">
+                  <tr>
+                    <td style="padding:12px;">
+                        <div style="font-size:14px; font-weight:700; color:#111827; margin-bottom:8px;">Performance</div>
+                        <div style="font-size:13px; color:#374151;">Today's P&L: <strong style="color: {% if avg_pnl_pct > 0 %}#16a34a{% elif avg_pnl_pct < 0 %}#dc2626{% else %}#374151{% endif %}">{{ "%.2f"|format(avg_pnl_pct) }}%</strong></div>
+                        <div style="font-size:13px; color:#374151;">Rolling 30-Day Win Rate: <strong>{{ "%.1f"|format(rolling_win_rate) }}%</strong></div>
+                        <div style="font-size:13px; color:#374151;">Rolling 30-Day Avg P&L: <strong>{{ "%.2f"|format(rolling_avg_pnl_pct) }}%</strong></div>
+                        <div style="font-size:13px; color:#374151; margin-top:8px;">Daily Target: <strong>Rs.{{ daily_target }}</strong></div>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+
+            <tr>
+                <td style="padding:16px 20px 4px 20px;">
+                  <div style="font-size:14px; font-weight:700; color:#111827; margin-bottom:8px;">Agent Verdict</div>
+                  <div style="font-size:14px; font-weight:700; color:
+                  {% if verdict == 'STRONG' %}#16a34a
+                  {% elif verdict == 'SOLID' %}#f59e0b
+                  {% elif verdict == 'BELOW TARGET' %}#f97316
+                  {% elif verdict == 'POOR' %}#dc2626
+                  {% else %}#6b7280{% endif %};
+                  ">
+                      {{ verdict }}
+                  </div>
+                </td>
+            </tr>
+
+            <tr>
+              <td style="padding:8px 16px 8px 16px;">
+                <div style="font-size:14px; font-weight:700; color:#111827; margin-bottom:8px; padding-left: 4px;">Today's Trades</div>
+                {% for rec in today_recommendations %}
+                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin:8px 0; border:1px solid #e5e7eb; border-radius:10px; border-left:5px solid {% if rec.status_color == 'GREEN' %}#16a34a{% elif rec.status_color == 'RED' %}#dc2626{% else %}#6b7280{% endif %};">
+                  <tr>
+                    <td style="padding:12px 12px 10px 12px;">
+                      <div style="font-size:16px; font-weight:700; color:#111827;">{{ rec.stock }} — {{ rec.action }}</div>
+                      <div style="font-size:13px; color:#111827; margin-top:8px;">
+                        Entry: <strong>Rs.{{ rec.entry_price }}</strong> |
+                        Target: <strong>Rs.{{ rec.target }}</strong> |
+                        SL: <strong>Rs.{{ rec.stop_loss }}</strong>
+                      </div>
+                      <div style="font-size:13px; color:#111827; margin-top:4px;">
+                        Actual Exit: <strong>Rs.{{ rec.actual_exit or 'N/A' }}</strong> |
+                        Outcome: <strong style="color: {% if rec.status_color == 'GREEN' %}#16a34a{% elif rec.status_color == 'RED' %}#dc2626{% else %}#6b7280{% endif %};">{{ rec.outcome }}</strong> |
+                        P&L: <strong style="color: {% if rec.pnl and rec.pnl > 0 %}#16a34a{% elif rec.pnl and rec.pnl < 0 %}#dc2626{% else %}#374151{% endif %}">{% if rec.pnl %}{{ "%.2f"|format(rec.pnl) }}%{% else %}N/A{% endif %}</strong>
+                      </div>
+                      <div style="margin-top:8px;">
+                        <span style="display:inline-block; background:#eef2ff; color:#1f2937; font-size:12px; font-weight:700; border-radius:8px; padding:4px 8px;">
+                          Risk Score: {{ rec.risk_score }}/10
+                        </span>
+                      </div>
+                      <div style="font-size:13px; line-height:1.45; color:#374151; margin-top:8px;">{{ rec.reasoning }}</div>
+                    </td>
+                  </tr>
+                </table>
+                {% else %}
+                <div style="font-size:13px; color:#6b7280; padding-left: 4px;">No trades generated today.</div>
+                {% endfor %}
+              </td>
+            </tr>
+
+            <tr>
+              <td style="padding:14px 20px; background:#f9fafb; border-top:1px solid #e5e7eb; font-size:12px; color:#6b7280;">
+                Generated by NSE/BSE AI Agent | {{ timestamp }}
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>

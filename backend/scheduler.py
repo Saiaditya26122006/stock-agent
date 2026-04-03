@@ -16,6 +16,7 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from analysis.claude_synthesis import get_user_config
 from db.recommendations import get_todays_recommendations, get_win_rate
+from db.outcome_logger import run_outcome_logger
 from db.supabase_client import supabase_client
 from notifications.email_sender import send_eod_report, send_morning_briefing
 from notifications.telegram_sender import send_alert, send_message, send_morning_briefing_telegram
@@ -69,7 +70,7 @@ def _derive_morning_payload(run_data: Dict[str, Any]) -> Dict[str, Any]:
             skipped_stocks.append({"symbol": symbol, "reason": rec_copy.get("reasoning", "No clear setup.")})
 
     user_cfg = get_user_config(user_id="sai_aditya")
-    india_vix = 15.0
+    india_vix = float(run_data.get("india_vix", 15.0))
     market_mood = _infer_market_mood(india_vix)
     return {
         "date": _now_ist().strftime("%A, %d %B %Y"),
@@ -165,28 +166,16 @@ def _render_eod_html(today_recs: List[Dict[str, Any]], summary: Dict[str, Any]) 
 async def eod_report_job() -> None:
     """Build and send EOD summary on weekdays."""
     try:
-        recs = get_todays_recommendations(user_id="sai_aditya")
-        closed = [r for r in recs if (r.get("outcome") not in (None, "still_open"))]
-        wins = [r for r in closed if r.get("outcome") in ("hit_target", "paper_hit_target")]
-        losses = [r for r in closed if r.get("outcome") not in ("hit_target", "paper_hit_target")]
-        summary = {
-            "total": len(recs),
-            "closed": len(closed),
-            "wins": len(wins),
-            "losses": len(losses),
-        }
-        eod_html = _render_eod_html(recs, summary)
-        email_ok = send_eod_report(html_content=eod_html)
-        tg_text = (
-            f"📘 EOD SUMMARY — {_now_ist().strftime('%d %b %Y')}\n"
-            f"Total: {summary['total']} | Closed: {summary['closed']}\n"
-            f"Wins: {summary['wins']} | Losses: {summary['losses']}"
-        )
-        tg_ok = await send_message(tg_text)
+        from notifications.eod_report import send_eod_report as execute_eod_report
+        report = execute_eod_report()
+        
+        status = "completed" if report else "partial_failure"
+        stocks_analysed = report.total_recommendations if report else 0
+        
         _log_scheduler_run(
             job_name="eod_report_job",
-            status="completed" if (email_ok and tg_ok) else "partial_failure",
-            meta={"stocks_analysed": len(recs), "recommendations_count": len(recs)},
+            status=status,
+            meta={"stocks_analysed": stocks_analysed, "recommendations_count": stocks_analysed},
         )
     except Exception as exc:
         logger.error("eod_report_job failed: %s", exc)
@@ -226,6 +215,17 @@ async def sunday_audit_job() -> None:
         _log_scheduler_run("sunday_audit_job", "failed")
 
 
+async def trailing_sl_monitor_job() -> None:
+    """9:20 AM: start trailing SL WebSocket monitor for open intraday positions."""
+    try:
+        logger.info("Trailing SL monitor job started")
+        from data.trailing_sl_monitor import start_trailing_sl_monitor
+        await start_trailing_sl_monitor()
+    except Exception as exc:
+        logger.error("Trailing SL monitor job failed: %s", exc)
+        _log_scheduler_run("trailing_sl_monitor_job", "failed")
+
+
 def trigger_morning_now() -> bool:
     """Trigger morning job immediately without waiting for schedule."""
     try:
@@ -253,6 +253,15 @@ def init_scheduler(_app) -> AsyncIOScheduler:
         hour=8,
         minute=52,
         id="morning_analysis_job",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        trailing_sl_monitor_job,
+        trigger="cron",
+        day_of_week="mon-fri",
+        hour=9,
+        minute=20,
+        id="trailing_sl_monitor_job",
         replace_existing=True,
     )
     scheduler.add_job(

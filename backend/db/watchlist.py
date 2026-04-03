@@ -56,7 +56,7 @@ def get_active_watchlist(user_id: str = "sai_aditya") -> List[Dict[str, Any]]:
     try:
         resp = (
             supabase_client.table("watchlist")
-            .select("id, symbol, exchange, added_date, active")
+            .select("id, symbol, exchange, added_date, active, sector")
             .eq("user_id", user_id)
             .eq("active", True)
             .order("symbol", desc=False)
@@ -72,7 +72,7 @@ def get_active_watchlist(user_id: str = "sai_aditya") -> List[Dict[str, Any]]:
 
 
 def add_symbol(
-    symbol: str, exchange: str = "NSE", user_id: str = "sai_aditya"
+    symbol: str, exchange: str = "NSE", user_id: str = "sai_aditya", sector: str = "Uncategorised"
 ) -> Dict[str, Any]:
     """
     Add a new symbol to the watchlist or reactivate an existing one.
@@ -112,7 +112,7 @@ def add_symbol(
             # Reactivate instead of inserting a duplicate.
             upd = (
                 supabase_client.table("watchlist")
-                .update({"active": True})
+                .update({"active": True, "sector": sector})
                 .eq("id", row_id)
                 .execute()
             )
@@ -138,6 +138,7 @@ def add_symbol(
                     "symbol": sym,
                     "exchange": exchange,
                     "active": True,
+                    "sector": sector,
                 }
             )
             .execute()
@@ -216,6 +217,21 @@ def remove_symbol(symbol: str, user_id: str = "sai_aditya") -> Dict[str, Any]:
             "success": False,
             "message": "Unexpected error while removing symbol.",
         }
+
+
+def get_watchlist_by_sector(user_id: str = "sai_aditya") -> Dict[str, Any]:
+    """
+    Fetch active watchlist entries grouped by sector.
+
+    Returns:
+        Dict keyed by sector name, each value a list of stock dicts.
+    """
+    rows = get_active_watchlist(user_id=user_id)
+    grouped: Dict[str, Any] = {}
+    for row in rows:
+        sec = row.get("sector") or "Uncategorised"
+        grouped.setdefault(sec, []).append(row)
+    return grouped
 
 
 def get_symbols_list(user_id: str = "sai_aditya") -> List[str]:

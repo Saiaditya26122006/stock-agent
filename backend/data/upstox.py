@@ -29,6 +29,7 @@ INSTRUMENT_KEYS: Dict[str, str] = {
     "HDFCBANK": "NSE_EQ|INE040A01034",
     "TATAMOTORS": "NSE_EQ|INE155A01022",
     "WIPRO": "NSE_EQ|INE075A01022",
+    "M&M": "NSE_EQ|INE101A01026",
 }
 
 _ALLOWED_INTERVALS = frozenset({"5minute", "15minute", "1hour", "day", "week"})
@@ -275,7 +276,10 @@ def get_instrument_key(symbol: str) -> str:
         return INSTRUMENT_KEYS[key]
 
     client = _get_client()
-    query = quote(key, safe="")
+    search_query = key
+    if search_query == "M&M":
+        search_query = "MM"
+    query = quote(search_query, safe="")
     url = f"{client.base_url}/instruments/search?query={query}&asset_type=equity"
     resp = client.request(
         "GET",
