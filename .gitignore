@@ -9,3 +9,6 @@ dist/
 *.sqlite
 .pytest_cache/
 .coverage
+backend/testenv/
+backend/start_backend.bat
+start_frontend.bat
