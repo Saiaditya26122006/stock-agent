@@ -4,6 +4,8 @@ import client from "../api/client";
 import LoadingSpinner from "../components/LoadingSpinner";
 import RecommendationCard from "../components/RecommendationCard";
 
+const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
+
 export default function Recommendations() {
   const [recs, setRecs] = useState([]);
   const [summary, setSummary] = useState({ total: 0, win_rate: 0, wins: 0, losses: 0 });
@@ -26,8 +28,8 @@ export default function Recommendations() {
   const refreshData = async () => {
     try {
       const [todayResp, winrateResp] = await Promise.all([
-        axios.get("http://localhost:8000/recommendations/today"),
-        axios.get("http://localhost:8000/recommendations/winrate"),
+        axios.get(`${API_URL}/recommendations/today`),
+        axios.get(`${API_URL}/recommendations/winrate`),
       ]);
       setRecs(todayResp.data.recommendations || []);
       setSummary({
@@ -143,7 +145,7 @@ export default function Recommendations() {
     pollIntervalRef.current = setInterval(async () => {
       pollAttempts += 1;
       try {
-        const res = await axios.get("http://localhost:8000/recommendations/today");
+        const res = await axios.get(`${API_URL}/recommendations/today`);
         const recData = res.data.recommendations || [];
         if (recData.length > 0) {
           clearInterval(pollIntervalRef.current);
