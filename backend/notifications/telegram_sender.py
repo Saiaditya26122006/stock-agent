@@ -73,6 +73,7 @@ def send_morning_briefing_telegram(
     market_regime: str | None = None,
     india_vix: float | None = None,
     special_day_alert: str | None = None,
+    stocks_analysed: int | None = None,
 ) -> bool:
     """Format and send a mobile-friendly morning Telegram briefing."""
     try:
@@ -125,7 +126,11 @@ def send_morning_briefing_telegram(
 
         skipped_text = ", ".join(skipped) if skipped else "None"
         lines.append(f"Skipped today: {skipped_text}")
-        lines.append(f"Total watchlist: {len(recommendations or [])} stocks analysed")
+        
+        # Use stocks_analysed if provided, otherwise fallback to len(recommendations)
+        total_count = stocks_analysed if stocks_analysed is not None else len(recommendations or [])
+        lines.append(f"Total watchlist: {total_count} stocks analysed")
+        
         return _run_async(send_message("\n".join(lines)))
     except Exception as exc:
         logger.error("Morning telegram briefing failed: %s", exc)
