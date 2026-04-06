@@ -107,13 +107,20 @@ async def morning_analysis_job() -> None:
     try:
         # Import lazily to avoid circular import while main imports scheduler.
         from main import run_analysis_pipeline
+        from db.watchlist import get_symbols_list
 
+        symbols = get_symbols_list(user_id="sai_aditya")
         run_data = run_analysis_pipeline(user_id="sai_aditya")
         payload = _derive_morning_payload(run_data)
         template = _get_jinja_env().get_template("morning_briefing.html")
         html = template.render(**payload)
         subject = f"🌅 NSE/BSE Morning Briefing — {payload['date']} [{payload['market_mood']}]"
-        email_ok = send_morning_briefing(html_content=html, subject=subject)
+        try:
+            email_ok = send_morning_briefing(html_content=html, subject=subject)
+            logger.info(f"Morning briefing email result: {email_ok}")
+        except Exception as e:
+            logger.error(f"Morning briefing email FAILED: {e}")
+            email_ok = False
         tg_ok = send_morning_briefing_telegram(
             recommendations=payload["recommendations"],
             market_mood=payload["market_mood"],
@@ -122,6 +129,7 @@ async def morning_analysis_job() -> None:
             special_day_alert=str(
                 ((run_data.get("premarket_context") or {}).get("morning_alert") or "")
             ).strip(),
+            stocks_analysed=len(symbols),
         )
         _log_scheduler_run(
             job_name="morning_analysis_job",
