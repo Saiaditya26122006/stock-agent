@@ -32,7 +32,9 @@ from analysis.market_regime import (
 )
 from analysis.gates import run_all_gates
 from data.nse import get_circuit_filter_status, get_gift_nifty, get_nse_announcements
+from data.nifty500 import NIFTY500_UNIVERSE
 from data.upstox import get_historical_ohlcv, test_connection as test_upstox_connection
+from analysis.screener import screen_universe
 from db.recommendations import (
     get_todays_recommendations,
     get_win_rate,
@@ -91,6 +93,11 @@ class RemoveWatchlistRequest(BaseModel):
 
 
 class RunAnalysisRequest(BaseModel):
+    user_id: str = "sai_aditya"
+
+
+class AnalyseSelectedRequest(BaseModel):
+    symbols: List[str] = Field(..., min_length=1, max_length=10)
     user_id: str = "sai_aditya"
 
 
@@ -600,6 +607,255 @@ async def scheduler_trigger_morning() -> Dict[str, Any]:
     except Exception as exc:
         logger.error("Manual morning trigger failed: %s", exc)
         raise HTTPException(status_code=500, detail=f"Failed to trigger morning job: {exc}") from exc
+
+
+# ---------------------------------------------------------------------------
+# Stock Discovery Layer
+# ---------------------------------------------------------------------------
+
+
+@app.get("/discover-stocks", status_code=200, response_model=None)
+def discover_stocks() -> Dict[str, Any]:
+    """Scan the Nifty 500 universe with lightweight signals.
+
+    This endpoint may take 60-90 seconds due to sequential Upstox API calls
+    with rate-limit sleeps.  Consider calling from the frontend with a long
+    timeout / spinner.
+    """
+    india_vix = 15.0
+    regime = "NORMAL"
+    try:
+        india_vix = float(get_india_vix())
+        regime = get_market_regime(india_vix)
+    except Exception as exc:
+        logger.error("discover-stocks VIX fetch failed: %s", exc)
+
+    try:
+        candidates = screen_universe(NIFTY500_UNIVERSE)
+    except Exception as exc:
+        logger.error("discover-stocks screening failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"Screening failed: {exc}") from exc
+
+    return {
+        "vix": round(india_vix, 2),
+        "regime": regime,
+        "scanned_count": len(NIFTY500_UNIVERSE),
+        "candidates_count": len(candidates),
+        "candidates": candidates,
+        "timestamp": _now_ist().isoformat(),
+    }
+
+
+@app.post("/analyse-selected", status_code=200, response_model=None)
+def analyse_selected(req: AnalyseSelectedRequest) -> Dict[str, Any]:
+    """Run the full analysis pipeline on user-selected discovery symbols.
+
+    Mirrors /run-analysis logic scoped to the provided symbol list.
+    Max 10 symbols per request.
+    """
+    if len(req.symbols) > 10:
+        raise HTTPException(
+            status_code=400,
+            detail="Too many symbols. Maximum 10 per request.",
+        )
+
+    symbols = [s.strip().upper() for s in req.symbols if s.strip()]
+    if not symbols:
+        raise HTTPException(status_code=400, detail="No valid symbols provided.")
+
+    errors: List[Dict[str, str]] = []
+    results: Dict[str, Any] = {}
+    full_signals: Dict[str, Dict[str, Any]] = {}
+    sentiment_results: Dict[str, Dict[str, Any]] = {}
+    risk_score_results: Dict[str, Dict[str, Any]] = {}
+    skipped_symbols: List[Dict[str, str]] = []
+    regime_config: Dict[str, Any] = get_regime_config(15.0)
+    india_vix = 15.0
+    market_regime = "NORMAL"
+
+    # ---- VIX / regime context (identical to /run-analysis) ----
+    try:
+        india_vix = float(get_india_vix())
+        market_regime = get_market_regime(india_vix)
+        regime_config = get_regime_config(india_vix)
+        logger.info("analyse-selected regime: %s | VIX: %.2f", market_regime, india_vix)
+    except Exception as exc:
+        logger.error("analyse-selected VIX fetch failed: %s", exc)
+        india_vix = 15.0
+        market_regime = "NORMAL"
+        regime_config = get_regime_config(india_vix)
+
+    # ---- TA engine for each symbol ----
+    for symbol in symbols:
+        try:
+            df = get_historical_ohlcv(symbol=symbol, interval="day", days=90)
+            signal = analyse_stock(symbol=symbol, timeframe="day", df=df)
+            full_signals[symbol] = signal
+            results[symbol] = {
+                "symbol": signal.get("symbol"),
+                "current_price": signal.get("current_price"),
+                "overall_signal": signal.get("overall_signal"),
+                "ema_trend": (signal.get("ema") or {}).get("trend"),
+                "rsi": (signal.get("rsi") or {}).get("value"),
+                "rsi_signal": (signal.get("rsi") or {}).get("signal"),
+                "macd_crossover": (signal.get("macd") or {}).get("crossover"),
+                "volume_ratio": signal.get("volume_ratio"),
+                "support_levels": signal.get("support_levels", []),
+                "resistance_levels": signal.get("resistance_levels", []),
+                "patterns": signal.get("patterns", []),
+                "atr_pct": (signal.get("atr") or {}).get("pct_of_price"),
+            }
+        except Exception as exc:
+            logger.error("analyse-selected TA failed for %s: %s", symbol, exc)
+            errors.append({"symbol": symbol, "error": str(exc)})
+
+    # ---- Sentiment ----
+    try:
+        sentiment_results = get_sentiment_batch(symbols)
+    except Exception as exc:
+        logger.error("analyse-selected sentiment batch failed: %s", exc)
+        sentiment_results = {s: {"symbol": s, "sentiment_score": 0.0, "error": str(exc)} for s in symbols}
+
+    # ---- Risk scoring + gates (same as /run-analysis) ----
+    filtered_signals: Dict[str, Dict[str, Any]] = {}
+    for symbol, signal in full_signals.items():
+        try:
+            sym_sent = float((sentiment_results.get(symbol) or {}).get("sentiment_score", 0.0))
+            risk_payload = compute_risk_score(signal_dict=signal, sentiment_score=sym_sent, symbol=symbol)
+        except Exception as exc:
+            logger.error("Risk scoring failed for %s: %s", symbol, exc)
+            risk_payload = {
+                "risk_score": 5.0, "tier": "moderate",
+                "recommendation": "half_position",
+                "component_scores": {}, "weights_applied": {},
+            }
+        risk_score_results[symbol] = risk_payload
+
+        try:
+            should_skip = should_skip_stock(
+                risk_score=float(risk_payload.get("risk_score", 5.0)),
+                sentiment_score=float((sentiment_results.get(symbol) or {}).get("sentiment_score", 0.0)),
+            )
+        except Exception as exc:
+            logger.error("Skip gate failed for %s: %s", symbol, exc)
+            should_skip = False
+
+        if should_skip:
+            skipped_symbols.append({"symbol": symbol, "reason": "risk_or_sentiment_gate"})
+        else:
+            try:
+                circuit_data = get_circuit_filter_status(symbol)
+            except Exception:
+                circuit_data = {}
+            try:
+                announcements = get_nse_announcements(symbol)
+            except Exception:
+                announcements = []
+            sym_sent_for_gate = float((sentiment_results.get(symbol) or {}).get("sentiment_score", 0.0))
+            gate_result = run_all_gates(
+                symbol=symbol, signal_dict=signal,
+                sentiment_score=sym_sent_for_gate,
+                circuit_data=circuit_data, announcements=announcements,
+            )
+            if gate_result.get("hard_failure"):
+                skipped_symbols.append({"symbol": symbol, "reason": gate_result.get("failure_reason", "gate_fail")})
+            else:
+                filtered_signals[symbol] = signal
+
+    # ---- Gemini synthesis with regime context ----
+    user_config = get_user_config(user_id=req.user_id)
+    regime_context = get_regime_prompt_injection(regime_config)
+    recommendations = synthesise_all(
+        symbols_signals=filtered_signals,
+        user_config=user_config,
+        regime_context=regime_context,
+    )
+
+    # Back-fill skipped symbols
+    for skipped in skipped_symbols:
+        sym = skipped.get("symbol", "")
+        if sym and sym not in recommendations:
+            recommendations[sym] = {
+                "symbol": sym, "action": "SKIP", "style": "intraday",
+                "entry_price": 0.0, "target": 0.0, "stop_loss": 0.0,
+                "hold_period": "N/A", "confidence": "LOW",
+                "reasoning": skipped.get("reason", "Filtered by gate."),
+                "risk_reward": 0.0,
+            }
+
+    # ---- Position sizing + regime overrides ----
+    for symbol, rec in recommendations.items():
+        try:
+            rec["risk_score"] = float((risk_score_results.get(symbol) or {}).get("risk_score", 5.0))
+            rec["sentiment_score"] = float((sentiment_results.get(symbol) or {}).get("sentiment_score", 0.0))
+            if rec.get("action") in {"BUY", "SELL"}:
+                min_risk = float(regime_config.get("min_risk_score", 5.0))
+                if float(rec["risk_score"]) < min_risk:
+                    rec["action"] = "SKIP"
+                    rec["reasoning"] = (
+                        f"{rec.get('reasoning', '')} | Regime gate: risk_score below {min_risk}"
+                    ).strip(" |")
+                    continue
+                sizing_result = calculate_position_size(
+                    capital=float(user_config.get("capital", 0.0)),
+                    risk_score=float((risk_score_results.get(symbol) or {}).get("risk_score", 5.0)),
+                    entry_price=float(rec.get("entry_price", 0.0) or 0.0),
+                    stop_loss=float(rec.get("stop_loss", 0.0) or 0.0),
+                )
+                try:
+                    sizing_result = apply_regime_to_position(sizing_result, regime_config)
+                except Exception as regime_exc:
+                    logger.error("Regime override failed for %s: %s", symbol, regime_exc)
+                rec["position_sizing"] = sizing_result
+                if sizing_result.get("action") == "skip":
+                    rec["action"] = "SKIP"
+                    rec["reasoning"] = (
+                        f"{rec.get('reasoning', '')} | Position sizing skip: {sizing_result.get('reason')}"
+                    ).strip(" |")
+        except Exception as exc:
+            logger.error("Position sizing enrichment failed for %s: %s", symbol, exc)
+
+    try:
+        recommendations = filter_by_regime(recommendations, regime_config)
+    except Exception as exc:
+        logger.error("Regime filtering failed for analyse-selected: %s", exc)
+
+    # ---- Log to Supabase recommendations_log ----
+    for symbol, rec in recommendations.items():
+        if rec.get("action") not in {"BUY", "SELL"}:
+            continue
+        rec_payload = {
+            "user_id": req.user_id,
+            "date": _now_ist().date().isoformat(),
+            "stock": symbol,
+            "style": rec.get("style", "intraday"),
+            "entry_price": rec.get("entry_price", 0.0),
+            "target": rec.get("target", 0.0),
+            "stop_loss": rec.get("stop_loss", 0.0),
+            "risk_score": (risk_score_results.get(symbol) or {}).get("risk_score", 0.0),
+            "sentiment_score": (sentiment_results.get(symbol) or {}).get("sentiment_score", 0.0),
+            "action": rec.get("action", "SKIP"),
+            "reasoning": rec.get("reasoning", ""),
+            "hold_period": rec.get("hold_period", "N/A"),
+            "confidence": rec.get("confidence", "LOW"),
+        }
+        log_res = log_recommendation(rec_payload)
+        if not log_res.get("success"):
+            errors.append({"symbol": symbol, "error": f"Log failed: {log_res.get('message')}"})
+
+    return {
+        "timestamp": _now_ist().isoformat(),
+        "stocks_analysed": len(symbols),
+        "results": results,
+        "recommendations": recommendations,
+        "market_regime": market_regime,
+        "india_vix": india_vix,
+        "sentiment_results": sentiment_results,
+        "risk_scores": risk_score_results,
+        "regime_config": regime_config,
+        "skipped_symbols": skipped_symbols,
+        "errors": errors,
+    }
 
 
 # ---------------------------------------------------------------------------

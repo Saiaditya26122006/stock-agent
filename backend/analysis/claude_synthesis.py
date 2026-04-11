@@ -13,7 +13,7 @@ from typing import Any, Dict
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
-import google.generativeai as genai
+from google import genai
 
 from db.supabase_client import supabase_client
 
@@ -184,9 +184,11 @@ def synthesise_recommendation(
         logger.info("Regime context injected into synthesis prompt for %s.", symbol)
 
     try:
-        genai.configure(api_key=gemini_api_key)
-        model = genai.GenerativeModel("gemini-1.5-flash")
-        response = model.generate_content(prompt)
+        client = genai.Client(api_key=gemini_api_key)
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+        )
         raw_text = response.text
     except Exception as exc:
         logger.error("Gemini API call failed for %s: %s", symbol, exc)

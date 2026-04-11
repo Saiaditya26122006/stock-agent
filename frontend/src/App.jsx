@@ -1,18 +1,21 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 import Navbar from "./components/Navbar";
 import Portfolio from "./pages/Portfolio";
-import Recommendations from "./pages/Recommendations";
+import Dashboard from "./pages/Dashboard";
 import Watchlist from "./pages/Watchlist";
+import Discovery from "./pages/Discovery";
 
 export default function App() {
   return (
-    <div className="min-h-screen bg-slate-900 text-slate-100">
+    <div className="min-h-screen bg-slate-50 text-slate-900 font-sans selection:bg-indigo-100 selection:text-indigo-900">
       <Navbar />
-      <main className="mx-auto max-w-6xl px-4 py-6">
+      <main className="mx-auto max-w-7xl px-4 py-8">
         <Routes>
-          <Route path="/" element={<Navigate to="/recommendations" replace />} />
+          <Route path="/" element={<Navigate to="/dashboard" replace />} />
+          <Route path="/dashboard" element={<Dashboard />} />
+          <Route path="/recommendations" element={<Navigate to="/dashboard" replace />} />
           <Route path="/watchlist" element={<Watchlist />} />
-          <Route path="/recommendations" element={<Recommendations />} />
+          <Route path="/discovery" element={<Discovery />} />
           <Route path="/portfolio" element={<Portfolio />} />
         </Routes>
       </main>
