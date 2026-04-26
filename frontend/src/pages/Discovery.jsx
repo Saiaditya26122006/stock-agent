@@ -1,9 +1,7 @@
 import { useState } from "react";
-import axios from "axios";
+import client from "../api/client";
 import LoadingSpinner from "../components/LoadingSpinner";
 import RecommendationCard from "../components/RecommendationCard";
-
-const API_URL = "http://localhost:8000";
 
 const SIGNAL_COLORS = {
   momentum: "bg-emerald-500/20 text-emerald-300 border-emerald-500/30",
@@ -49,7 +47,7 @@ export default function Discovery() {
     setAnalysisError("");
 
     try {
-      const res = await axios.get(`${API_URL}/discover-stocks`, {
+      const res = await client.get("/discover-stocks", {
         timeout: 300_000, // 5 min — scan is slow
       });
       setScanData(res.data);
@@ -90,8 +88,8 @@ export default function Discovery() {
     setAnalysisResults(null);
 
     try {
-      const res = await axios.post(
-        `${API_URL}/analyse-selected`,
+      const res = await client.post(
+        "/analyse-selected",
         { symbols: Array.from(selected) },
         { timeout: 300_000 }
       );

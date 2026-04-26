@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
-from analysis.claude_synthesis import get_user_config
+from analysis.gemini_synthesis import get_user_config
 from db.recommendations import get_todays_recommendations, get_win_rate
 from db.outcome_logger import run_outcome_logger
 from db.supabase_client import supabase_client

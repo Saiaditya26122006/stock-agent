@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from analysis.claude_synthesis import (
+from analysis.gemini_synthesis import (
     format_morning_briefing,
     get_user_config,
     synthesise_all,

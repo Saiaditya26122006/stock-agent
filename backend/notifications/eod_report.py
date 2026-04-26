@@ -12,7 +12,7 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 from db.outcome_logger import run_outcome_logger, get_outcomes_summary
 from db.recommendations import get_todays_recommendations
 from db.supabase_client import supabase_client
-from analysis.claude_synthesis import get_user_config
+from analysis.gemini_synthesis import get_user_config
 from analysis.feasibility import get_india_vix, get_market_regime
 from notifications.email_sender import send_eod_report as email_send_eod_report
 from notifications.telegram_sender import send_message, _run_async

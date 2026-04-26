@@ -1,12 +1,13 @@
 import { useEffect, useState, useRef } from "react";
-import axios from "axios";
+import client from "../api/client";
 import RecommendationCard from "../components/RecommendationCard";
-import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
-import { Play, TrendingUp, TrendingDown, Target, Zap, Server, Activity, PieChart as PieChartIcon } from "lucide-react";
+import {
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip,
+  ResponsiveContainer, PieChart, Pie, Cell,
+} from "recharts";
+import { Play, TrendingUp, TrendingDown, Target, Zap, Server, Activity, PieChart as PieChartIcon, BarChart2 } from "lucide-react";
 
-const API_URL = "http://localhost:8000";
-
-const COLORS = ['#6366f1', '#10b981', '#f43f5e', '#f59e0b', '#06b6d4', '#8b5cf6', '#ec4899'];
+const COLORS = ["#6366f1", "#10b981", "#f43f5e", "#f59e0b", "#06b6d4", "#8b5cf6", "#ec4899"];
 
 export default function Dashboard() {
   const [recs, setRecs] = useState([]);
@@ -17,7 +18,6 @@ export default function Dashboard() {
   const [countdown, setCountdown] = useState(0);
   const [error, setError] = useState("");
   const [runError, setRunError] = useState("");
-  const [stockCount, setStockCount] = useState(40);
   const pollIntervalRef = useRef(null);
   const countdownTimerRef = useRef(null);
 
@@ -31,9 +31,9 @@ export default function Dashboard() {
   const refreshData = async () => {
     try {
       const [todayResp, winrateResp, sectorResp] = await Promise.all([
-        axios.get(`${API_URL}/recommendations/today`),
-        axios.get(`${API_URL}/recommendations/winrate`),
-        axios.get(`${API_URL}/watchlist/by-sector`),
+        client.get("/recommendations/today"),
+        client.get("/recommendations/winrate"),
+        client.get("/watchlist/by-sector"),
       ]);
       setRecs(todayResp.data.recommendations || []);
       setSummary({
@@ -42,13 +42,11 @@ export default function Dashboard() {
         wins: winrateResp.data.wins || 0,
         losses: winrateResp.data.losses || 0,
       });
-      // Format sectors
       const sectorMap = sectorResp.data || {};
-      const formattedSectors = Object.keys(sectorMap).filter(k => k !== 'count' && k !== 'total_sectors').map((key) => ({
-        name: key,
-        value: sectorMap[key].length
-      }));
-      setSectors(formattedSectors.sort((a,b) => b.value - a.value));
+      const formattedSectors = Object.keys(sectorMap)
+        .filter((k) => k !== "count" && k !== "total_sectors")
+        .map((key) => ({ name: key, value: sectorMap[key].length }));
+      setSectors(formattedSectors.sort((a, b) => b.value - a.value));
     } catch {
       // silently ignore refresh failures
     }
@@ -63,9 +61,9 @@ export default function Dashboard() {
       setError("");
       try {
         const [todayResp, winrateResp, sectorResp] = await Promise.all([
-          axios.get(`${API_URL}/recommendations/today`, { signal: controller.signal }),
-          axios.get(`${API_URL}/recommendations/winrate`, { signal: controller.signal }),
-          axios.get(`${API_URL}/watchlist/by-sector`, { signal: controller.signal }),
+          client.get("/recommendations/today", { signal: controller.signal }),
+          client.get("/recommendations/winrate", { signal: controller.signal }),
+          client.get("/watchlist/by-sector", { signal: controller.signal }),
         ]);
         if (isMounted) {
           setRecs(todayResp.data.recommendations || []);
@@ -75,16 +73,14 @@ export default function Dashboard() {
             wins: winrateResp.data.wins || 0,
             losses: winrateResp.data.losses || 0,
           });
-          
           const sectorMap = sectorResp.data || {};
-          const formattedSectors = Object.keys(sectorMap).filter(k => k !== 'count' && k !== 'total_sectors').map((key) => ({
-            name: key,
-            value: sectorMap[key].length
-          }));
-          setSectors(formattedSectors.sort((a,b) => b.value - a.value));
+          const formattedSectors = Object.keys(sectorMap)
+            .filter((k) => k !== "count" && k !== "total_sectors")
+            .map((key) => ({ name: key, value: sectorMap[key].length }));
+          setSectors(formattedSectors.sort((a, b) => b.value - a.value));
         }
       } catch (err) {
-        if (axios.isCancel(err)) return;
+        if (err?.code === "ERR_CANCELED") return;
         if (isMounted) {
           if (err?.response?.status === 404) {
             setRecs([]);
@@ -93,14 +89,11 @@ export default function Dashboard() {
           }
         }
       } finally {
-        if (isMounted) {
-          setLoading(false);
-        }
+        if (isMounted) setLoading(false);
       }
     };
 
     fetchInitial();
-
     return () => {
       isMounted = false;
       controller.abort();
@@ -116,19 +109,16 @@ export default function Dashboard() {
     setError("");
 
     const FALLBACK_COUNT = 40;
-    setStockCount(FALLBACK_COUNT);
     let secs = FALLBACK_COUNT * 7;
     setCountdown(secs);
 
     countdownTimerRef.current = setInterval(() => {
       secs -= 1;
       setCountdown(secs);
-      if (secs <= 0) {
-        clearInterval(countdownTimerRef.current);
-      }
+      if (secs <= 0) clearInterval(countdownTimerRef.current);
     }, 1000);
 
-    axios.post(`${API_URL}/scheduler/trigger-morning`).catch(() => {});
+    client.post("/scheduler/trigger-morning").catch(() => {});
 
     let pollAttempts = 0;
     const maxPollAttempts = 30;
@@ -136,17 +126,9 @@ export default function Dashboard() {
     pollIntervalRef.current = setInterval(async () => {
       pollAttempts += 1;
       try {
-        const res = await axios.get(`${API_URL}/recommendations/today`);
+        const res = await client.get("/recommendations/today");
         const recData = res.data.recommendations || [];
-        if (recData.length > 0) {
-          clearInterval(pollIntervalRef.current);
-          clearInterval(countdownTimerRef.current);
-          setRunning(false);
-          setCountdown(0);
-          refreshData();
-          return;
-        }
-        if (pollAttempts >= maxPollAttempts) {
+        if (recData.length > 0 || pollAttempts >= maxPollAttempts) {
           clearInterval(pollIntervalRef.current);
           clearInterval(countdownTimerRef.current);
           setRunning(false);
@@ -154,31 +136,30 @@ export default function Dashboard() {
           refreshData();
         }
       } catch {
+        // ignore poll errors
       }
     }, 20000);
   };
-  
-  // Mock performance data for visual appeal
+
+  // Real performance data from API — wins vs losses (last 20 trades)
   const performanceData = [
-    { day: 'Mon', value: 1200 },
-    { day: 'Tue', value: 1800 },
-    { day: 'Wed', value: 1500 },
-    { day: 'Thu', value: 2400 },
-    { day: 'Fri', value: Math.max(3000, 3000 * (summary.win_rate/100)) }
-  ];
+    { name: "Wins", value: summary.wins, fill: "#10b981" },
+    { name: "Losses", value: summary.losses, fill: "#f43f5e" },
+    { name: "Open", value: Math.max(0, summary.total - summary.wins - summary.losses), fill: "#6366f1" },
+  ].filter((d) => d.value > 0);
 
   return (
     <div className="space-y-8 animate-in fade-in duration-500">
-      
+
       {/* Top Header & Trigger Action */}
       <div className="flex flex-col gap-6 md:flex-row md:items-center md:justify-between rounded-3xl bg-white p-8 shadow-sm border border-slate-200">
         <div className="space-y-2">
           <h2 className="text-3xl font-extrabold text-slate-800 tracking-tight flex items-center gap-2">
             Intelligence Overview <Zap size={28} className="text-indigo-500" />
           </h2>
-          <p className="text-slate-500 font-medium">Your automated trading agent performance & daily signals.</p>
+          <p className="text-slate-500 font-medium">Your automated trading agent performance &amp; daily signals.</p>
         </div>
-        
+
         <button
           onClick={runAnalysisNow}
           disabled={running}
@@ -209,7 +190,7 @@ export default function Dashboard() {
         <div className="rounded-xl border border-indigo-200 bg-indigo-50 p-4 text-sm text-indigo-800 font-bold flex items-center gap-3">
           <Server className="animate-bounce" size={20} />
           {countdown > 0
-            ? `Deep Analysing stocks... High compute resources allocated.`
+            ? "Deep Analysing stocks... High compute resources allocated."
             : "Agent is finalizing report... Hold on."}
         </div>
       )}
@@ -223,14 +204,14 @@ export default function Dashboard() {
       {/* KPI Stats Row */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm">
-          <div className="text-slate-400 font-semibold mb-1 text-sm uppercase tracking-wider">Today's Recs</div>
+          <div className="text-slate-400 font-semibold mb-1 text-sm uppercase tracking-wider">Today&apos;s Recs</div>
           <div className="text-3xl font-black text-slate-800">{summary.total}</div>
         </div>
         <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm relative overflow-hidden">
           <div className="absolute right-0 top-0 w-24 h-24 bg-emerald-50 rounded-bl-full pointer-events-none" />
           <div className="text-slate-400 font-semibold mb-1 text-sm uppercase tracking-wider">Win Rate</div>
           <div className="text-3xl font-black text-emerald-600 flex items-baseline gap-1">
-            {summary.win_rate}% 
+            {summary.win_rate}%
             <TrendingUp size={24} className="text-emerald-500 translate-y-1" />
           </div>
         </div>
@@ -270,8 +251,8 @@ export default function Dashboard() {
                       <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
                     ))}
                   </Pie>
-                  <RechartsTooltip 
-                    contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }} 
+                  <RechartsTooltip
+                    contentStyle={{ borderRadius: "12px", border: "none", boxShadow: "0 4px 6px -1px rgb(0 0 0 / 0.1)" }}
                   />
                 </PieChart>
               </ResponsiveContainer>
@@ -283,26 +264,30 @@ export default function Dashboard() {
 
         <div className="bg-white rounded-3xl p-6 border border-slate-200 shadow-sm">
           <h3 className="text-lg font-bold text-slate-800 mb-6 flex items-center gap-2">
-            <Target size={20} className="text-emerald-500" /> Simulated Performance Trajectory
+            <BarChart2 size={20} className="text-emerald-500" /> Trade Outcomes (Last 20)
           </h3>
           <div className="h-64">
-            <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={performanceData}>
-                <defs>
-                  <linearGradient id="colorValue" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#6366f1" stopOpacity={0.3}/>
-                    <stop offset="95%" stopColor="#6366f1" stopOpacity={0}/>
-                  </linearGradient>
-                </defs>
-                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
-                <XAxis dataKey="day" axisLine={false} tickLine={false} tick={{fill: '#94a3b8'}} />
-                <YAxis axisLine={false} tickLine={false} tick={{fill: '#94a3b8'}} />
-                <RechartsTooltip 
-                  contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
-                />
-                <Area type="monotone" dataKey="value" stroke="#4f46e5" strokeWidth={3} fillOpacity={1} fill="url(#colorValue)" />
-              </AreaChart>
-            </ResponsiveContainer>
+            {performanceData.length > 0 ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={performanceData} barCategoryGap="30%">
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                  <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fill: "#94a3b8" }} />
+                  <YAxis axisLine={false} tickLine={false} tick={{ fill: "#94a3b8" }} allowDecimals={false} />
+                  <RechartsTooltip
+                    contentStyle={{ borderRadius: "12px", border: "none", boxShadow: "0 4px 6px -1px rgb(0 0 0 / 0.1)" }}
+                  />
+                  <Bar dataKey="value" radius={[6, 6, 0, 0]}>
+                    {performanceData.map((entry, index) => (
+                      <Cell key={`bar-${index}`} fill={entry.fill} />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="h-full flex items-center justify-center text-slate-400 font-medium">
+                No closed trades yet — run analysis to populate.
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -313,7 +298,7 @@ export default function Dashboard() {
           <h3 className="text-2xl font-extrabold text-slate-800 mb-6 px-2">Actionable Signals</h3>
           {loading ? (
             <div className="rounded-3xl border border-white bg-white/50 backdrop-blur p-12 flex justify-center text-indigo-500">
-               <Activity className="animate-spin" size={32} />
+              <Activity className="animate-spin" size={32} />
             </div>
           ) : recs.length === 0 && !running && !error ? (
             <div className="rounded-3xl border border-dashed border-slate-300 bg-white/50 p-12 text-center text-slate-500 font-medium">
