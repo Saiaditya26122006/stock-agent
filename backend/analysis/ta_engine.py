@@ -797,14 +797,25 @@ def get_mtf_confluence(symbol: str) -> Dict[str, Any]:
         "week":     365,
     }
     tf_results: Dict[str, Dict[str, Any]] = {}
-    for tf, days in TF_CONFIG.items():
-        try:
-            df = get_historical_ohlcv(symbol, tf, days)
-            if df is None or df.empty:
-                continue
-            tf_results[tf] = analyse_stock(symbol, tf, df)
-        except Exception as exc:
-            logger.warning("MTF fetch failed for %s %s: %s", symbol, tf, exc)
+
+    # Fetch all timeframes in parallel to cut latency from ~30s to ~10s
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    def _fetch_tf(tf: str, days: int):
+        df = get_historical_ohlcv(symbol, tf, days)
+        if df is None or df.empty:
+            return tf, None
+        return tf, analyse_stock(symbol, tf, df)
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        futures = {pool.submit(_fetch_tf, tf, days): tf for tf, days in TF_CONFIG.items()}
+        for fut in as_completed(futures):
+            try:
+                tf, result = fut.result(timeout=45)
+                if result is not None:
+                    tf_results[tf] = result
+            except Exception as exc:
+                logger.warning("MTF fetch failed for %s %s: %s", symbol, futures[fut], exc)
 
     if not tf_results:
         return {

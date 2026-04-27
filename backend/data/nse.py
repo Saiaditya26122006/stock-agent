@@ -313,6 +313,45 @@ def get_gift_nifty() -> Dict[str, Any]:
         return default
 
 
+def get_advance_decline() -> Dict[str, Any]:
+    """
+    Fetch NSE market breadth — advances vs declines for all listed stocks.
+    Returns: {"advances": int, "declines": int, "unchanged": int, "ad_ratio": float}
+    """
+    default = {"advances": 500, "declines": 500, "unchanged": 50, "ad_ratio": 0.5}
+    try:
+        data = _get_json(f"{NSE_BASE}/allIndices")
+        if not isinstance(data, dict):
+            return default
+        advances = int(_safe_float(data.get("advances", 500)))
+        declines  = int(_safe_float(data.get("declines", 500)))
+        unchanged = int(_safe_float(data.get("unchanged", 50)))
+        total = advances + declines
+        ad_ratio = round(advances / total, 4) if total > 0 else 0.5
+        return {
+            "advances": advances,
+            "declines":  declines,
+            "unchanged": unchanged,
+            "ad_ratio":  ad_ratio,
+        }
+    except Exception as exc:
+        logger.warning("get_advance_decline failed: %s", exc)
+        return default
+
+
+def get_fii_net_flow() -> float:
+    """
+    Convenience wrapper — return FII net flow (Cr) for regime classifier.
+    Positive = net buyers, negative = net sellers.
+    """
+    try:
+        data = get_fii_dii_data()
+        return float(data.get("fii_net", 0.0))
+    except Exception as exc:
+        logger.warning("get_fii_net_flow failed: %s", exc)
+        return 0.0
+
+
 def get_full_premarket_data(symbols: List[str]) -> Dict[str, Any]:
     """Collect all NSE premarket intelligence with per-call isolation."""
     out = {

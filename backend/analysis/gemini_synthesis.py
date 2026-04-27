@@ -254,10 +254,22 @@ def _call_gemini(prompt: str) -> Optional[str]:
 
 
 def _parse_response(raw: str) -> Optional[Dict[str, Any]]:
+    stripped = _strip_markdown_fences(raw)
     try:
-        return json.loads(_strip_markdown_fences(raw))
-    except Exception:
-        logger.error("JSON parse failed. Raw: %s", raw[:300])
+        parsed = json.loads(stripped)
+        if not isinstance(parsed, dict):
+            logger.error("Gemini returned non-dict JSON (type=%s). Raw: %s", type(parsed).__name__, stripped[:200])
+            return None
+        # Must have at minimum an action field
+        if "action" not in parsed:
+            logger.error("Gemini JSON missing 'action' field. Keys: %s", list(parsed.keys()))
+            return None
+        return parsed
+    except json.JSONDecodeError as exc:
+        logger.error("JSON parse failed (line %d col %d). Raw: %.300s", exc.lineno, exc.colno, stripped)
+        return None
+    except Exception as exc:
+        logger.error("Unexpected JSON parse error: %s. Raw: %.200s", exc, stripped)
         return None
 
 
@@ -267,11 +279,21 @@ def _enrich_short_term(parsed: Dict[str, Any], signal_dict: Dict[str, Any]) -> D
         action = "SKIP"
 
     st = parsed.get("short_term") or {}
-    entry = _round_price(st.get("entry_price", 0.0))
-    target = _round_price(st.get("target", 0.0))
-    stop = _round_price(st.get("stop_loss", 0.0))
+    # Fall back to top-level fields if short_term block is absent (older Gemini responses)
+    entry = _round_price(st.get("entry_price") or parsed.get("entry_price", 0.0))
+    target = _round_price(st.get("target") or parsed.get("target", 0.0))
+    stop = _round_price(st.get("stop_loss") or parsed.get("stop_loss", 0.0))
 
     if action in {"WATCH", "SKIP"}:
+        entry = target = stop = 0.0
+
+    # Guard: if Gemini returned BUY/SELL but prices are zero → degrade to SKIP
+    if action in {"BUY", "SELL"} and (entry == 0.0 or target == 0.0 or stop == 0.0):
+        logger.warning(
+            "_enrich_short_term: zero prices for %s action on %s — downgrading to SKIP",
+            action, parsed.get("symbol", "?"),
+        )
+        action = "SKIP"
         entry = target = stop = 0.0
 
     risk = abs(entry - stop)
@@ -317,6 +339,15 @@ def _enrich_long_term(parsed: Dict[str, Any], signal_dict: Dict[str, Any]) -> Di
     sl_mc = _round_price(lt.get("stop_loss_monthly_close", 0.0))
 
     if action in {"WATCH", "SKIP"}:
+        accum = t6 = t12 = sl_mc = 0.0
+
+    # Guard: BUY with no price levels → downgrade to SKIP
+    if action == "BUY" and (accum == 0.0 or t6 == 0.0 or sl_mc == 0.0):
+        logger.warning(
+            "_enrich_long_term: zero prices for BUY on %s — downgrading to SKIP",
+            parsed.get("symbol", "?"),
+        )
+        action = "SKIP"
         accum = t6 = t12 = sl_mc = 0.0
 
     cp    = float(signal_dict.get("current_price") or 0.0)

@@ -133,6 +133,11 @@ def _exit_analysis_lock() -> None:
         _analysis_running = False
 
 
+def _is_analysis_running() -> bool:
+    with _run_state_lock:
+        return _analysis_running
+
+
 def log_run_start(user_id: str) -> Optional[str]:
     try:
         now_iso = _now_ist().isoformat()
@@ -328,15 +333,16 @@ def run_analysis(req: Optional[RunAnalysisRequest] = None) -> Dict[str, Any]:
                 risk_payload = compute_risk_score(signal_dict=signal, sentiment_score=sym_sent, symbol=symbol)
             except Exception as exc:
                 logger.error("Risk scoring failed for %s: %s", symbol, exc)
+                # Default HIGH risk when scoring fails — conservative, avoid bad trades
                 risk_payload = {
-                    "risk_score": 5.0,
-                    "tier": "moderate",
-                    "recommendation": "half_position",
+                    "risk_score": 7.5,
+                    "tier": "high",
+                    "recommendation": "skip",
                     "component_scores": {},
                     "weights_applied": {},
                 }
             risk_score_results[symbol] = risk_payload
-            logger.info("Risk score computed for %s: %.2f", symbol, float(risk_payload.get("risk_score", 5.0)))
+            logger.info("Risk score computed for %s: %.2f", symbol, float(risk_payload.get("risk_score", 7.5)))
             try:
                 should_skip = should_skip_stock(
                     risk_score=float(risk_payload.get("risk_score", 5.0)),
@@ -621,20 +627,39 @@ def recommendations_open(user_id: str = "sai_aditya") -> Dict[str, Any]:
     """All open positions (outcome is null or still_open) across all dates."""
     try:
         from db.supabase_client import supabase_client as _sb
-        resp = (
+        # Fetch rows where outcome IS NULL
+        resp_null = (
             _sb.table("recommendations_log")
             .select("*")
             .eq("user_id", user_id)
             .eq("action", "BUY")
-            .or_("outcome.is.null,outcome.eq.still_open")
+            .is_("outcome", None)
             .order("created_at", desc=True)
             .execute()
         )
-        positions = getattr(resp, "data", None) or []
-        return {"positions": positions, "count": len(positions)}
+        # Fetch rows where outcome = 'still_open'
+        resp_open = (
+            _sb.table("recommendations_log")
+            .select("*")
+            .eq("user_id", user_id)
+            .eq("action", "BUY")
+            .eq("outcome", "still_open")
+            .order("created_at", desc=True)
+            .execute()
+        )
+        positions = (getattr(resp_null, "data", None) or []) + (getattr(resp_open, "data", None) or [])
+        # De-duplicate by id
+        seen = set()
+        unique = []
+        for p in positions:
+            if p.get("id") not in seen:
+                seen.add(p.get("id"))
+                unique.append(p)
+        unique.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+        return {"positions": unique, "count": len(unique)}
     except Exception as exc:
         logger.error("/recommendations/open failed: %s", exc)
-        raise HTTPException(status_code=500, detail="Failed to fetch open positions.")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch open positions: {type(exc).__name__}")
 
 
 @app.get("/recommendations/history", status_code=200, response_model=Dict[str, Any])
@@ -644,7 +669,7 @@ def recommendations_history(user_id: str = "sai_aditya", last_n: int = 50) -> Di
         from db.supabase_client import supabase_client as _sb
         resp = (
             _sb.table("recommendations_log")
-            .select("date,stock,action,entry_price,exit_price,pnl,outcome,horizon")
+            .select("date,stock,action,entry_price,actual_exit,pnl,outcome")
             .eq("user_id", user_id)
             .not_.is_("outcome", None)
             .neq("outcome", "still_open")
@@ -666,9 +691,40 @@ def recommendations_history(user_id: str = "sai_aditya", last_n: int = 50) -> Di
         raise HTTPException(status_code=500, detail="Failed to fetch trade history.")
 
 
+@app.get("/market/regime", status_code=200, response_model=Dict[str, Any])
+def market_regime_endpoint() -> Dict[str, Any]:
+    """Return current market regime + VIX from the multi-signal classifier."""
+    try:
+        from analysis.regime_classifier import get_regime_with_features
+        result = get_regime_with_features(use_cache=True)
+        return {
+            "regime": result.get("regime", "NORMAL"),
+            "vix": result.get("features", {}).get("vix", 15.0),
+            "features": result.get("features", {}),
+            "timestamp": _now_ist().isoformat(),
+        }
+    except Exception as exc:
+        logger.error("/market/regime failed: %s", exc)
+        try:
+            from analysis.feasibility import get_india_vix, get_market_regime
+            vix = float(get_india_vix())
+            return {"regime": get_market_regime(vix), "vix": vix, "features": {}, "timestamp": _now_ist().isoformat()}
+        except Exception:
+            return {"regime": "NORMAL", "vix": 15.0, "features": {}, "timestamp": _now_ist().isoformat()}
+
+
 @app.get("/scheduler/status", status_code=200, response_model=Dict[str, Any])
 def scheduler_status() -> Dict[str, Any]:
     return get_scheduler_status()
+
+
+@app.post("/admin/reset-lock", status_code=200, response_model=Dict[str, Any])
+def admin_reset_lock() -> Dict[str, Any]:
+    """Force-release the analysis lock if it gets stuck (e.g. from a timed-out request)."""
+    was_running = _is_analysis_running()
+    _exit_analysis_lock()
+    logger.warning("admin/reset-lock called — lock was %s", "SET" if was_running else "already clear")
+    return {"success": True, "was_locked": was_running, "message": "Analysis lock released."}
 
 
 @app.post("/scheduler/trigger-morning", status_code=200, response_model=Dict[str, Any])
@@ -758,6 +814,22 @@ def auto_discover() -> Dict[str, Any]:
     except Exception as exc:
         logger.error("auto-discover screening failed: %s", exc)
         raise HTTPException(status_code=500, detail=f"Screening failed: {exc}") from exc
+
+    # Warn if screening returned nothing (market closed / data unavailable)
+    if not top.get("short_term") and not top.get("long_term"):
+        logger.warning("auto-discover: 0 candidates qualified — market closed or data unavailable.")
+        return {
+            "timestamp": _now_ist().isoformat(),
+            "market_regime": market_regime,
+            "india_vix": round(india_vix, 2),
+            "total_screened": top.get("total_screened", len(NIFTY500_UNIVERSE)),
+            "total_qualified": 0,
+            "short_term": [],
+            "long_term": [],
+            "candidates": {"short_term": [], "long_term": []},
+            "all_recommendations": {},
+            "errors": [{"symbol": "SCREEN", "error": "No stocks met minimum screening criteria. Market may be closed or data unavailable."}],
+        }
 
     short_symbols = [c["symbol"] for c in top["short_term"]]
     long_symbols  = [c["symbol"] for c in top["long_term"]]
@@ -909,12 +981,20 @@ def analyse_selected(req: AnalyseSelectedRequest) -> Dict[str, Any]:
         market_regime = "NORMAL"
         regime_config = get_regime_config(india_vix)
 
-    # ---- TA engine for each symbol ----
+    # ---- TA engine — full MTF confluence for each symbol ----
+    confluence_map: Dict[str, str] = {}
+    timeframes_map: Dict[str, Dict[str, str]] = {}
     for symbol in symbols:
         try:
-            df = get_historical_ohlcv(symbol=symbol, interval="day", days=90)
-            signal = analyse_stock(symbol=symbol, timeframe="day", df=df)
-            full_signals[symbol] = signal
+            mtf = get_mtf_confluence(symbol)
+            signal = mtf.get("signal_dict", {})
+            if not signal:
+                # Fallback to single-timeframe if MTF failed
+                df = get_historical_ohlcv(symbol=symbol, interval="day", days=90)
+                signal = analyse_stock(symbol=symbol, timeframe="day", df=df)
+            full_signals[symbol]   = signal
+            confluence_map[symbol] = mtf.get("confluence", "unknown")
+            timeframes_map[symbol] = mtf.get("timeframes", {})
             results[symbol] = {
                 "symbol": signal.get("symbol"),
                 "current_price": signal.get("current_price"),
@@ -928,6 +1008,7 @@ def analyse_selected(req: AnalyseSelectedRequest) -> Dict[str, Any]:
                 "resistance_levels": signal.get("resistance_levels", []),
                 "patterns": signal.get("patterns", []),
                 "atr_pct": (signal.get("atr") or {}).get("pct_of_price"),
+                "confluence": confluence_map[symbol],
             }
         except Exception as exc:
             logger.error("analyse-selected TA failed for %s: %s", symbol, exc)
@@ -993,6 +1074,8 @@ def analyse_selected(req: AnalyseSelectedRequest) -> Dict[str, Any]:
         symbols_signals=filtered_signals,
         user_config=user_config,
         regime_context=regime_context,
+        confluence_map=confluence_map,
+        timeframes_map=timeframes_map,
     )
 
     # Back-fill skipped symbols
