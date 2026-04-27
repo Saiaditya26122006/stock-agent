@@ -1,0 +1,129 @@
+<!doctype html>
+<html>
+  <body style="margin:0; padding:0; background:#f3f4f6; font-family:Arial, sans-serif; color:#111827;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f3f4f6; padding:20px 0;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="600" cellspacing="0" cellpadding="0" style="max-width:600px; width:100%; background:#ffffff; border-radius:12px; overflow:hidden;">
+
+            <!-- Header -->
+            <tr>
+              <td style="background:#1e3a5f; padding:18px 20px;">
+                <div style="font-size:18px; font-weight:700; color:#ffffff;">📋 Long-Term Position Review</div>
+                <div style="font-size:13px; color:#bfdbfe; margin-top:6px;">{{ symbol }} &mdash; {{ date }}</div>
+              </td>
+            </tr>
+
+            <!-- Price snapshot -->
+            <tr>
+              <td style="padding:16px 20px 8px 20px;">
+                <table role="presentation" width="100%" cellspacing="0" cellpadding="0">
+                  <tr>
+                    <td width="50%" style="padding-right:8px;">
+                      <div style="background:#f9fafb; border:1px solid #e5e7eb; border-radius:10px; padding:12px 14px;">
+                        <div style="font-size:11px; color:#9ca3af; text-transform:uppercase; letter-spacing:0.05em;">Entry Price</div>
+                        <div style="font-size:20px; font-weight:700; color:#111827; margin-top:2px;">Rs.{{ entry_price }}</div>
+                        <div style="font-size:11px; color:#9ca3af; margin-top:2px;">{{ entry_date }}</div>
+                      </div>
+                    </td>
+                    <td width="50%" style="padding-left:8px;">
+                      <div style="background:#f9fafb; border:1px solid #e5e7eb; border-radius:10px; padding:12px 14px;">
+                        <div style="font-size:11px; color:#9ca3af; text-transform:uppercase; letter-spacing:0.05em;">Current Price</div>
+                        <div style="font-size:20px; font-weight:700; color:{{ pnl_color }}; margin-top:2px;">Rs.{{ current_price }}</div>
+                        <div style="font-size:11px; font-weight:700; color:{{ pnl_color }}; margin-top:2px;">{{ pnl_sign }}{{ pnl_pct }}% from entry</div>
+                      </div>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+
+            <!-- Targets -->
+            <tr>
+              <td style="padding:8px 20px;">
+                <div style="font-size:14px; font-weight:700; color:#111827; margin-bottom:8px;">Price Targets</div>
+                <table role="presentation" width="100%" cellspacing="0" cellpadding="0"
+                       style="background:#f0fdf4; border:1px solid #bbf7d0; border-radius:10px; padding:12px 14px;">
+                  <tr>
+                    <td style="font-size:13px; color:#15803d;">
+                      6-Month Target: <strong>Rs.{{ target_6m }}</strong>
+                      &nbsp;&nbsp;
+                      12-Month Target: <strong>Rs.{{ target_12m }}</strong>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="font-size:13px; color:#374151; padding-top:6px;">
+                      Monthly Stop-Loss Close: <strong style="color:#dc2626;">Rs.{{ stop_loss_monthly }}</strong>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+
+            <!-- Investment thesis -->
+            <tr>
+              <td style="padding:8px 20px;">
+                <div style="font-size:14px; font-weight:700; color:#111827; margin-bottom:6px;">Investment Thesis</div>
+                <div style="font-size:13px; color:#374151; line-height:1.6; background:#f9fafb;
+                            border-left:4px solid #1e3a5f; padding:12px 14px; border-radius:0 8px 8px 0;">
+                  {{ thesis }}
+                </div>
+              </td>
+            </tr>
+
+            <!-- Exit conditions -->
+            {% if exit_if %}
+            <tr>
+              <td style="padding:8px 20px;">
+                <div style="font-size:14px; font-weight:700; color:#111827; margin-bottom:6px;">Exit If</div>
+                <div style="background:#fef2f2; border:1px solid #fecaca; border-radius:10px; padding:12px 14px;">
+                  {% for condition in exit_if %}
+                  <div style="font-size:13px; color:#b91c1c; margin-bottom:4px;">• {{ condition }}</div>
+                  {% endfor %}
+                </div>
+              </td>
+            </tr>
+            {% endif %}
+
+            <!-- Status / Action -->
+            <tr>
+              <td style="padding:8px 20px 20px 20px;">
+                <div style="font-size:14px; font-weight:700; color:#111827; margin-bottom:6px;">Recommended Action</div>
+                <div style="background:{% if action == 'HOLD' %}#f0fdf4{% elif action == 'TRIM' %}#fffbeb{% else %}#fef2f2{% endif %};
+                            border:1px solid {% if action == 'HOLD' %}#bbf7d0{% elif action == 'TRIM' %}#fde68a{% else %}#fecaca{% endif %};
+                            border-radius:8px; padding:12px 14px;">
+                  <span style="font-size:15px; font-weight:700;
+                    color:{% if action == 'HOLD' %}#15803d{% elif action == 'TRIM' %}#92400e{% else %}#b91c1c{% endif %};">
+                    {% if action == 'HOLD' %}✅ HOLD — thesis intact{% elif action == 'TRIM' %}🟠 TRIM — take partial profits{% else %}🔴 EXIT — thesis broken{% endif %}
+                  </span>
+                  <div style="font-size:13px; color:#374151; margin-top:6px;">{{ action_reason }}</div>
+                </div>
+              </td>
+            </tr>
+
+            <!-- Next review date -->
+            {% if next_review_date %}
+            <tr>
+              <td style="padding:0 20px 16px 20px;">
+                <div style="font-size:12px; color:#9ca3af;">
+                  Next scheduled review: <strong style="color:#374151;">{{ next_review_date }}</strong>
+                </div>
+              </td>
+            </tr>
+            {% endif %}
+
+            <!-- Footer -->
+            <tr>
+              <td style="background:#f9fafb; padding:12px 20px; border-top:1px solid #e5e7eb;">
+                <div style="font-size:11px; color:#9ca3af; text-align:center;">
+                  NSE/BSE Stock Agent &mdash; {{ timestamp }}
+                </div>
+              </td>
+            </tr>
+
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>

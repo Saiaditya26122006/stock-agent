@@ -373,66 +373,114 @@ def _rounded_list(values: List[float]) -> List[float]:
 
 def _detect_candle_patterns(df: pd.DataFrame) -> List[str]:
     """
-    Detect basic candlestick patterns on the last candle manually.
+    Detect candlestick patterns on the last 1-3 candles.
 
-    Patterns checked:
-        - doji
-        - hammer
-        - shooting_star
-        - bullish_engulfing
-        - bearish_engulfing
+    Single-bar: doji, hammer, shooting_star, inverted_hammer, hanging_man
+    Two-bar:    bullish_engulfing, bearish_engulfing, bullish_harami, bearish_harami, piercing_line, dark_cloud_cover
+    Three-bar:  morning_star, evening_star, three_white_soldiers, three_black_crows
     """
-
     patterns: List[str] = []
-    if len(df) < 2:
+    if len(df) < 3:
         return patterns
 
     try:
-        last = df.iloc[-1]
-        prev = df.iloc[-2]
+        c0 = df.iloc[-1]   # latest candle
+        c1 = df.iloc[-2]   # previous
+        c2 = df.iloc[-3]   # two bars back
 
-        body = abs(float(last["close"]) - float(last["open"]))
-        candle_range = float(last["high"]) - float(last["low"])
+        def _body(c):   return abs(float(c["close"]) - float(c["open"]))
+        def _range(c):  return float(c["high"]) - float(c["low"])
+        def _bull(c):   return float(c["close"]) > float(c["open"])
+        def _bear(c):   return float(c["close"]) < float(c["open"])
+        def _mid(c):    return (float(c["open"]) + float(c["close"])) / 2.0
 
-        if candle_range == 0:
+        b0, r0 = _body(c0), _range(c0)
+        if r0 == 0:
             return patterns
+        ratio0 = b0 / r0
+        lower0 = min(float(c0["open"]), float(c0["close"])) - float(c0["low"])
+        upper0 = float(c0["high"]) - max(float(c0["open"]), float(c0["close"]))
 
-        body_ratio = body / candle_range
-
-        # Doji: body is less than 10% of total range
-        if body_ratio < 0.1:
+        # ── Single-bar ────────────────────────────────────────────────────
+        if ratio0 < 0.1:
             patterns.append("doji")
 
-        # Hammer: small body at top, long lower shadow
-        lower_shadow = min(last["open"], last["close"]) - last["low"]
-        upper_shadow = last["high"] - max(last["open"], last["close"])
-        if lower_shadow > 2 * body and upper_shadow < body and body_ratio < 0.3:
-            patterns.append("hammer")
+        if lower0 > 2 * b0 and upper0 < b0 and ratio0 < 0.35:
+            if _bull(c0):
+                patterns.append("hammer")
+            else:
+                patterns.append("hanging_man")
 
-        # Shooting star: small body at bottom, long upper shadow
-        if upper_shadow > 2 * body and lower_shadow < body and body_ratio < 0.3:
-            patterns.append("shooting_star")
+        if upper0 > 2 * b0 and lower0 < b0 and ratio0 < 0.35:
+            if _bear(c0):
+                patterns.append("shooting_star")
+            else:
+                patterns.append("inverted_hammer")
 
-        # Bullish engulfing
-        if (
-            last["close"] > last["open"]
-            and prev["close"] < prev["open"]
-            and last["open"] < prev["close"]
-            and last["close"] > prev["open"]
-        ):
+        # ── Two-bar ───────────────────────────────────────────────────────
+        b1 = _body(c1)
+
+        if _bull(c0) and _bear(c1) and float(c0["open"]) < float(c1["close"]) and float(c0["close"]) > float(c1["open"]):
             patterns.append("bullish_engulfing")
 
-        # Bearish engulfing
-        if (
-            last["close"] < last["open"]
-            and prev["close"] > prev["open"]
-            and last["open"] > prev["close"]
-            and last["close"] < prev["open"]
-        ):
+        if _bear(c0) and _bull(c1) and float(c0["open"]) > float(c1["close"]) and float(c0["close"]) < float(c1["open"]):
             patterns.append("bearish_engulfing")
 
-    except Exception as e:  # pragma: no cover - defensive
-        logging.warning(f"Pattern detection failed: {e}")
+        if _bear(c1) and _bull(c0) and float(c0["open"]) > float(c1["close"]) and float(c0["close"]) < float(c1["open"]):
+            patterns.append("bullish_harami")
+
+        if _bull(c1) and _bear(c0) and float(c0["open"]) < float(c1["close"]) and float(c0["close"]) > float(c1["open"]):
+            patterns.append("bearish_harami")
+
+        # Piercing line: big bear candle followed by bull candle closing above midpoint of c1
+        if _bear(c1) and _bull(c0) and b1 > 0 and float(c0["close"]) > _mid(c1) and float(c0["open"]) < float(c1["close"]):
+            patterns.append("piercing_line")
+
+        # Dark cloud cover: big bull candle followed by bear candle opening above high and closing below midpoint
+        if _bull(c1) and _bear(c0) and b1 > 0 and float(c0["open"]) > float(c1["high"]) and float(c0["close"]) < _mid(c1):
+            patterns.append("dark_cloud_cover")
+
+        # ── Three-bar ─────────────────────────────────────────────────────
+        b2 = _body(c2)
+
+        # Morning star: big bear → small body → big bull closing above c2 midpoint
+        if (
+            _bear(c2) and b2 > 0
+            and _body(c1) < b2 * 0.3
+            and _bull(c0)
+            and float(c0["close"]) > _mid(c2)
+        ):
+            patterns.append("morning_star")
+
+        # Evening star: big bull → small body → big bear closing below c2 midpoint
+        if (
+            _bull(c2) and b2 > 0
+            and _body(c1) < b2 * 0.3
+            and _bear(c0)
+            and float(c0["close"]) < _mid(c2)
+        ):
+            patterns.append("evening_star")
+
+        # Three white soldiers: three consecutive bullish candles each closing higher
+        if (
+            _bull(c2) and _bull(c1) and _bull(c0)
+            and float(c1["close"]) > float(c2["close"])
+            and float(c0["close"]) > float(c1["close"])
+            and _body(c1) > 0 and _body(c0) > 0 and b2 > 0
+        ):
+            patterns.append("three_white_soldiers")
+
+        # Three black crows: three consecutive bearish candles each closing lower
+        if (
+            _bear(c2) and _bear(c1) and _bear(c0)
+            and float(c1["close"]) < float(c2["close"])
+            and float(c0["close"]) < float(c1["close"])
+            and _body(c1) > 0 and _body(c0) > 0 and b2 > 0
+        ):
+            patterns.append("three_black_crows")
+
+    except Exception as e:
+        logging.warning("Pattern detection failed: %s", e)
 
     return patterns
 
@@ -723,5 +771,82 @@ def get_summary(all_timeframe_results: Dict[str, Dict[str, Any]]) -> Dict[str, A
         "positional_signal": positional_sig,
         "confluence": confluence,
         "strongest_timeframe": strongest_tf,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Multi-timeframe confluence — main pipeline entry point
+# ---------------------------------------------------------------------------
+
+def get_mtf_confluence(symbol: str) -> Dict[str, Any]:
+    """
+    Fetch 15min, daily, and weekly OHLCV data and compute a 3-timeframe
+    confluence score.  Returns a rich dict consumed by the analysis pipeline.
+
+    Confluence rules:
+      aligned_bullish  → at least 2 of 3 timeframes bullish, none bearish
+      aligned_bearish  → at least 2 of 3 timeframes bearish, none bullish
+      mixed            → disagreement across timeframes
+
+    The returned ``primary_signal`` is the daily signal (most reliable for
+    swing/intraday decisions on NSE).
+    """
+    TF_CONFIG = {
+        "15minute": 10,
+        "day":      90,
+        "week":     365,
+    }
+    tf_results: Dict[str, Dict[str, Any]] = {}
+    for tf, days in TF_CONFIG.items():
+        try:
+            df = get_historical_ohlcv(symbol, tf, days)
+            if df is None or df.empty:
+                continue
+            tf_results[tf] = analyse_stock(symbol, tf, df)
+        except Exception as exc:
+            logger.warning("MTF fetch failed for %s %s: %s", symbol, tf, exc)
+
+    if not tf_results:
+        return {
+            "symbol": symbol,
+            "confluence": "unknown",
+            "primary_signal": "neutral",
+            "timeframes": {},
+            "confluence_score": 0,
+            "passes_confluence": False,
+        }
+
+    signals = {tf: r.get("overall_signal", "neutral") for tf, r in tf_results.items()}
+
+    bullish_count = sum(1 for s in signals.values() if _is_bullish(s))
+    bearish_count = sum(1 for s in signals.values() if _is_bearish(s))
+
+    if bullish_count >= 2 and bearish_count == 0:
+        confluence = "aligned_bullish"
+    elif bearish_count >= 2 and bullish_count == 0:
+        confluence = "aligned_bearish"
+    else:
+        confluence = "mixed"
+
+    # Confluence score: +1 per bullish TF, -1 per bearish TF
+    confluence_score = bullish_count - bearish_count
+
+    # Primary signal from daily chart; fall back to any available TF
+    primary_signal = signals.get("day") or next(iter(signals.values()), "neutral")
+
+    # Stock passes confluence if at least 2 TFs agree on direction
+    passes_confluence = confluence in ("aligned_bullish", "aligned_bearish")
+
+    # Merge all indicator data from daily TF as the canonical signal dict
+    daily_data = tf_results.get("day", {})
+
+    return {
+        "symbol": symbol,
+        "confluence": confluence,
+        "confluence_score": confluence_score,
+        "passes_confluence": passes_confluence,
+        "primary_signal": primary_signal,
+        "timeframes": signals,
+        "signal_dict": daily_data,   # full daily TA dict for Gemini prompt
     }
 

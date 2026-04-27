@@ -5,7 +5,14 @@ import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip,
   ResponsiveContainer, PieChart, Pie, Cell,
 } from "recharts";
-import { Play, TrendingUp, TrendingDown, Target, Zap, Server, Activity, PieChart as PieChartIcon, BarChart2 } from "lucide-react";
+import { Play, TrendingUp, TrendingDown, Zap, Server, Activity, PieChart as PieChartIcon, BarChart2, Clock, LayoutList, XCircle } from "lucide-react";
+
+const HORIZON_TABS = [
+  { key: "all",        label: "All",        icon: LayoutList },
+  { key: "SHORT_TERM", label: "Short-Term", icon: Clock },
+  { key: "LONG_TERM",  label: "Long-Term",  icon: TrendingUp },
+  { key: "skipped",    label: "Skipped",    icon: XCircle },
+];
 
 const COLORS = ["#6366f1", "#10b981", "#f43f5e", "#f59e0b", "#06b6d4", "#8b5cf6", "#ec4899"];
 
@@ -18,6 +25,7 @@ export default function Dashboard() {
   const [countdown, setCountdown] = useState(0);
   const [error, setError] = useState("");
   const [runError, setRunError] = useState("");
+  const [activeTab, setActiveTab] = useState("all");
   const pollIntervalRef = useRef(null);
   const countdownTimerRef = useRef(null);
 
@@ -292,25 +300,112 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* Recs Listing */}
+      {/* Recs Listing with horizon tabs */}
       <div className="bg-slate-100/50 -mx-4 px-4 py-8 rounded-t-[3rem]">
         <div className="max-w-7xl mx-auto">
-          <h3 className="text-2xl font-extrabold text-slate-800 mb-6 px-2">Actionable Signals</h3>
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6 px-2">
+            <h3 className="text-2xl font-extrabold text-slate-800">Actionable Signals</h3>
+
+            {/* Horizon tab pills */}
+            <div className="flex gap-2 flex-wrap">
+              {HORIZON_TABS.map(({ key, label, icon: Icon }) => {
+                const count =
+                  key === "all"     ? recs.filter(r => r.action !== "SKIP").length
+                  : key === "skipped" ? recs.filter(r => r.action === "SKIP").length
+                  : recs.filter(r => r.horizon === key && r.action !== "SKIP").length;
+                const active = activeTab === key;
+                return (
+                  <button
+                    key={key}
+                    onClick={() => setActiveTab(key)}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-sm font-semibold transition-all ${
+                      active
+                        ? key === "SHORT_TERM" ? "bg-amber-500 text-white"
+                          : key === "LONG_TERM"  ? "bg-indigo-600 text-white"
+                          : key === "skipped"    ? "bg-slate-500 text-white"
+                          : "bg-slate-800 text-white"
+                        : "bg-white border border-slate-200 text-slate-600 hover:border-slate-400"
+                    }`}
+                  >
+                    <Icon size={14} />
+                    {label}
+                    <span className={`ml-0.5 text-xs px-1.5 py-0.5 rounded-full ${active ? "bg-white/25" : "bg-slate-100 text-slate-500"}`}>
+                      {count}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
           {loading ? (
             <div className="rounded-3xl border border-white bg-white/50 backdrop-blur p-12 flex justify-center text-indigo-500">
               <Activity className="animate-spin" size={32} />
             </div>
-          ) : recs.length === 0 && !running && !error ? (
-            <div className="rounded-3xl border border-dashed border-slate-300 bg-white/50 p-12 text-center text-slate-500 font-medium">
-              No recommendations generated today. The agent requires fresh scanning or the market may not present viable setups.
-            </div>
-          ) : recs.length > 0 ? (
-            <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-2">
-              {recs.map((rec) => (
-                <RecommendationCard key={rec.id || `${rec.stock}-${rec.created_at}`} rec={rec} />
-              ))}
-            </div>
-          ) : null}
+          ) : activeTab === "skipped" ? (
+            /* Skipped stocks — plain-English explainer */
+            (() => {
+              const skipped = recs.filter(r => r.action === "SKIP");
+              return skipped.length === 0 ? (
+                <div className="rounded-3xl border border-dashed border-slate-300 bg-white/50 p-12 text-center text-slate-500 font-medium">
+                  No stocks were skipped today — the agent found clean setups for all analysed stocks.
+                </div>
+              ) : (
+                <div className="grid gap-4 md:grid-cols-2">
+                  {skipped.map((rec) => (
+                    <div key={rec.id || rec.stock} className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="font-bold text-slate-800 text-base">{rec.stock || rec.symbol}</span>
+                        <span className="text-xs bg-slate-100 text-slate-500 font-semibold px-2 py-0.5 rounded-full">SKIPPED</span>
+                      </div>
+                      <p className="text-sm text-slate-600 leading-relaxed">
+                        {rec.reasoning || "No clear entry signal — conflicting indicators or low volume. The agent chose to wait for a better setup."}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              );
+            })()
+          ) : (
+            (() => {
+              const filtered = activeTab === "all"
+                ? recs.filter(r => r.action !== "SKIP")
+                : recs.filter(r => r.horizon === activeTab && r.action !== "SKIP");
+
+              if (filtered.length === 0 && !running && !error) {
+                const emptyMsg = activeTab === "SHORT_TERM"
+                  ? "No short-term trades today — the agent found no high-probability intraday or swing setups."
+                  : activeTab === "LONG_TERM"
+                  ? "No long-term entries today — wait for better accumulation zones or run a fresh scan."
+                  : "No recommendations generated today. Run analysis or wait for the morning scan.";
+                return (
+                  <div className="rounded-3xl border border-dashed border-slate-300 bg-white/50 p-12 text-center text-slate-500 font-medium">
+                    {emptyMsg}
+                  </div>
+                );
+              }
+
+              return (
+                <>
+                  {activeTab === "SHORT_TERM" && (
+                    <div className="mb-4 rounded-xl bg-amber-50 border border-amber-200 px-4 py-3 text-sm text-amber-800 font-medium">
+                      ⚡ Short-term trades — hold for 1 day to 1 week. Exit immediately if stop-loss is hit. Watch for the exit trigger.
+                    </div>
+                  )}
+                  {activeTab === "LONG_TERM" && (
+                    <div className="mb-4 rounded-xl bg-indigo-50 border border-indigo-200 px-4 py-3 text-sm text-indigo-800 font-medium">
+                      📈 Long-term investments — accumulate below the entry price, target 6–12 months. Use monthly closing price for stop-loss decisions.
+                    </div>
+                  )}
+                  <div className="grid gap-6 md:grid-cols-2">
+                    {filtered.map((rec) => (
+                      <RecommendationCard key={rec.id || `${rec.stock}-${rec.created_at}`} rec={rec} />
+                    ))}
+                  </div>
+                </>
+              );
+            })()
+          )}
         </div>
       </div>
     </div>

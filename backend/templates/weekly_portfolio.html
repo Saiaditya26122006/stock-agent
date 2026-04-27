@@ -1,0 +1,147 @@
+<!doctype html>
+<html>
+  <body style="margin:0; padding:0; background:#f3f4f6; font-family:Arial, sans-serif; color:#111827;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f3f4f6; padding:20px 0;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="600" cellspacing="0" cellpadding="0" style="max-width:600px; width:100%; background:#ffffff; border-radius:12px; overflow:hidden;">
+
+            <!-- Header -->
+            <tr>
+              <td style="background:#111827; padding:18px 20px;">
+                <div style="font-size:18px; font-weight:700; color:#ffffff;">📊 Weekly Portfolio Digest</div>
+                <div style="font-size:13px; color:#d1d5db; margin-top:6px;">{{ date }} — Long-Term Health Review</div>
+              </td>
+            </tr>
+
+            <!-- Win rate summary bar -->
+            <tr>
+              <td style="padding:16px 20px;">
+                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f9fafb; border-radius:10px; padding:14px; border:1px solid #e5e7eb;">
+                  <tr>
+                    <td style="font-size:13px; color:#374151;">
+                      <strong style="font-size:16px; color:{{ win_rate_color }}">{{ win_rate }}% Win Rate</strong>
+                      &nbsp;(last {{ last_n }} closed trades)
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="padding-top:8px;">
+                      <div style="background:#e5e7eb; border-radius:999px; height:8px; width:100%;">
+                        <div style="background:{{ win_rate_color }}; border-radius:999px; height:8px; width:{{ win_rate }}%;"></div>
+                      </div>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="padding-top:10px; font-size:13px; color:#6b7280;">
+                      Wins: <strong>{{ wins }}</strong> &nbsp;|&nbsp;
+                      Losses: <strong>{{ losses }}</strong> &nbsp;|&nbsp;
+                      Open: <strong>{{ open_count }}</strong> &nbsp;|&nbsp;
+                      Net P&amp;L (7d): <strong style="color:{{ pnl_color }}">{{ pnl_sign }}Rs.{{ total_pnl }}</strong>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+
+            <!-- Open long-term positions -->
+            {% if open_positions %}
+            <tr>
+              <td style="padding:0 20px 8px 20px;">
+                <div style="font-size:14px; font-weight:700; color:#111827; margin-bottom:8px;">Open Long-Term Positions</div>
+                {% for pos in open_positions %}
+                <table role="presentation" width="100%" cellspacing="0" cellpadding="0"
+                       style="margin:6px 0; border:1px solid #e5e7eb; border-radius:10px;
+                              border-left:5px solid {% if pos.pnl_pct >= 0 %}#16a34a{% else %}#dc2626{% endif %};">
+                  <tr>
+                    <td style="padding:10px 14px;">
+                      <div style="font-size:14px; font-weight:700; color:#111827;">{{ pos.symbol }}</div>
+                      <div style="font-size:12px; color:#6b7280; margin-top:3px;">
+                        Entry: Rs.{{ pos.entry_price }} &nbsp;|&nbsp;
+                        CMP: Rs.{{ pos.current_price }} &nbsp;|&nbsp;
+                        P&amp;L: <strong style="color:{% if pos.pnl_pct >= 0 %}#16a34a{% else %}#dc2626{% endif %}">
+                          {{ pos.pnl_sign }}{{ pos.pnl_pct }}%
+                        </strong>
+                      </div>
+                      {% if pos.review_date %}
+                      <div style="font-size:11px; color:#9ca3af; margin-top:2px;">Review by: {{ pos.review_date }}</div>
+                      {% endif %}
+                    </td>
+                  </tr>
+                </table>
+                {% endfor %}
+              </td>
+            </tr>
+            {% else %}
+            <tr>
+              <td style="padding:0 20px 8px 20px;">
+                <div style="font-size:13px; color:#6b7280; font-style:italic;">No open long-term positions this week.</div>
+              </td>
+            </tr>
+            {% endif %}
+
+            <!-- Closed trades this week -->
+            {% if closed_trades %}
+            <tr>
+              <td style="padding:0 20px 16px 20px;">
+                <div style="font-size:14px; font-weight:700; color:#111827; margin-bottom:8px;">Closed This Week</div>
+                <table role="presentation" width="100%" cellspacing="0" cellpadding="0"
+                       style="border-collapse:collapse; border:1px solid #e5e7eb; border-radius:8px; overflow:hidden;">
+                  <tr style="background:#f9fafb;">
+                    <th style="padding:8px 10px; font-size:12px; text-align:left; border-bottom:1px solid #e5e7eb;">Stock</th>
+                    <th style="padding:8px 10px; font-size:12px; text-align:left; border-bottom:1px solid #e5e7eb;">Outcome</th>
+                    <th style="padding:8px 10px; font-size:12px; text-align:right; border-bottom:1px solid #e5e7eb;">P&amp;L</th>
+                  </tr>
+                  {% for trade in closed_trades %}
+                  <tr>
+                    <td style="padding:8px 10px; font-size:13px; border-bottom:1px solid #f3f4f6;">{{ trade.symbol }}</td>
+                    <td style="padding:8px 10px; font-size:13px; border-bottom:1px solid #f3f4f6;">
+                      <span style="padding:2px 8px; border-radius:999px; font-size:11px; font-weight:700;
+                        background:{% if trade.outcome == 'hit_target' %}#dcfce7{% else %}#fee2e2{% endif %};
+                        color:{% if trade.outcome == 'hit_target' %}#15803d{% else %}#b91c1c{% endif %};">
+                        {{ trade.outcome | replace('_', ' ') | title }}
+                      </span>
+                    </td>
+                    <td style="padding:8px 10px; font-size:13px; text-align:right; border-bottom:1px solid #f3f4f6;
+                                color:{% if trade.pnl >= 0 %}#16a34a{% else %}#dc2626{% endif %}; font-weight:700;">
+                      {{ trade.pnl_sign }}Rs.{{ trade.pnl }}
+                    </td>
+                  </tr>
+                  {% endfor %}
+                </table>
+              </td>
+            </tr>
+            {% endif %}
+
+            <!-- Status message -->
+            <tr>
+              <td style="padding:0 20px 20px 20px;">
+                <div style="background:{% if win_rate >= 55 %}#f0fdf4{% elif win_rate >= 45 %}#fffbeb{% else %}#fef2f2{% endif %};
+                            border:1px solid {% if win_rate >= 55 %}#bbf7d0{% elif win_rate >= 45 %}#fde68a{% else %}#fecaca{% endif %};
+                            border-radius:8px; padding:12px 14px; font-size:13px;
+                            color:{% if win_rate >= 55 %}#15803d{% elif win_rate >= 45 %}#92400e{% else %}#b91c1c{% endif %};">
+                  {% if win_rate >= 55 %}
+                    ✅ Strong performance — stay the course. Keep position sizes consistent.
+                  {% elif win_rate >= 45 %}
+                    🟠 Neutral week — review any positions at or near stop-loss levels.
+                  {% else %}
+                    🔴 Win rate below 45% — consider reducing position sizes and reviewing entry criteria.
+                  {% endif %}
+                </div>
+              </td>
+            </tr>
+
+            <!-- Footer -->
+            <tr>
+              <td style="background:#f9fafb; padding:12px 20px; border-top:1px solid #e5e7eb;">
+                <div style="font-size:11px; color:#9ca3af; text-align:center;">
+                  NSE/BSE Stock Agent &mdash; {{ timestamp }}
+                </div>
+              </td>
+            </tr>
+
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>

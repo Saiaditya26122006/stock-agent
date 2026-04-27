@@ -147,6 +147,75 @@ def send_alert(symbol: str, alert_type: str, message: str) -> bool:
         return False
 
 
+async def send_exit_alert(
+    symbol: str,
+    reason: str,
+    current_price: float | None,
+    entry_price: float,
+) -> bool:
+    """Alert the user to exit an open intraday position before market close."""
+    try:
+        price_line = f"CMP: Rs.{current_price:.2f} | Entry: Rs.{entry_price:.2f}" if current_price else f"Entry: Rs.{entry_price:.2f}"
+        text = (
+            f"🚨 EXIT ALERT — {symbol}\n"
+            f"{price_line}\n"
+            f"Reason: {reason}\n"
+            f"⏰ Time: {datetime.now(IST).strftime('%H:%M IST')}"
+        )
+        return await send_message(text)
+    except Exception as exc:
+        logger.error("send_exit_alert failed for %s: %s", symbol, exc)
+        return False
+
+
+async def send_drawdown_alert(
+    symbol: str,
+    entry_price: float,
+    current_price: float,
+    drawdown_pct: float,
+) -> bool:
+    """Alert the user that a long-term holding has breached 8% drawdown."""
+    try:
+        text = (
+            f"📉 DRAWDOWN ALERT — {symbol}\n"
+            f"Entry: Rs.{entry_price:.2f} | CMP: Rs.{current_price:.2f}\n"
+            f"Drawdown: -{drawdown_pct:.2f}%\n"
+            "Action: Review position — consider trimming or exiting.\n"
+            f"⏰ {datetime.now(IST).strftime('%d %b %Y %H:%M IST')}"
+        )
+        return await send_message(text)
+    except Exception as exc:
+        logger.error("send_drawdown_alert failed for %s: %s", symbol, exc)
+        return False
+
+
+async def send_weekly_portfolio_digest(rolling_summary: dict) -> bool:
+    """Send a weekly long-term portfolio health digest every Sunday."""
+    try:
+        total   = rolling_summary.get("total", 0)
+        wins    = rolling_summary.get("wins", 0)
+        losses  = rolling_summary.get("losses", 0)
+        open_p  = rolling_summary.get("open", 0)
+        win_rate = round(wins / total * 100, 1) if total else 0.0
+        pnl     = rolling_summary.get("total_pnl", 0.0)
+        pnl_sign = "+" if pnl >= 0 else ""
+
+        status_emoji = "🟢" if win_rate >= 55 else ("🟠" if win_rate >= 45 else "🔴")
+        text = (
+            f"📊 WEEKLY PORTFOLIO DIGEST — {datetime.now(IST).strftime('%d %b %Y')}\n"
+            "──────────────────\n"
+            f"{status_emoji} Win Rate (7d): {win_rate}%\n"
+            f"Trades: {total} | Wins: {wins} | Losses: {losses} | Open: {open_p}\n"
+            f"Net P&L (7d): {pnl_sign}Rs.{pnl:,.0f}\n"
+            "──────────────────\n"
+            "Review open long-term positions and adjust stops if needed."
+        )
+        return await send_message(text)
+    except Exception as exc:
+        logger.error("send_weekly_portfolio_digest failed: %s", exc)
+        return False
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     ok = send_alert(symbol="TEST", alert_type="connectivity", message="Telegram test ping from stock-agent.")

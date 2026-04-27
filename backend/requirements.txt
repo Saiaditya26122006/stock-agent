@@ -21,3 +21,8 @@ brotli
 newsapi-python
 upstox-python-sdk
 vectorbt
+# RL / ML stack (optional — agent gracefully degrades if not installed)
+scikit-learn
+joblib
+gymnasium
+stable-baselines3

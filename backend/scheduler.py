@@ -210,11 +210,21 @@ async def sunday_audit_job() -> None:
         else:
             status_msg = "NEUTRAL PERFORMANCE"
 
+        # Re-train the contextual bandit with latest closed trades
+        try:
+            from analysis.bandit_evaluator import run_bandit_evaluation
+            bandit_result = run_bandit_evaluation(user_id="sai_aditya", last_n=500)
+            bandit_status = f"Bandit: {bandit_result.get('processed', 0)} trades | trusted={bandit_result.get('trusted', False)}"
+        except Exception as exc:
+            logger.warning("sunday_audit_job: bandit evaluation failed: %s", exc)
+            bandit_status = "Bandit update: skipped"
+
         tg_text = (
             "📅 SUNDAY AUDIT\n"
             f"Win rate (last 20): {win_rate}%\n"
             f"Wins: {stats.get('wins', 0)} | Losses: {stats.get('losses', 0)}\n"
-            f"Status: {status_msg}"
+            f"Status: {status_msg}\n"
+            f"🤖 {bandit_status}"
         )
         await send_message(tg_text)
         _log_scheduler_run("sunday_audit_job", "completed", meta={"recommendations_count": stats.get("total", 0)})
@@ -232,6 +242,94 @@ async def trailing_sl_monitor_job() -> None:
     except Exception as exc:
         logger.error("Trailing SL monitor job failed: %s", exc)
         _log_scheduler_run("trailing_sl_monitor_job", "failed")
+
+
+async def weekly_portfolio_job() -> None:
+    """Sunday 10 AM: send weekly long-term portfolio health digest."""
+    try:
+        from notifications.telegram_sender import send_weekly_portfolio_digest
+        from db.outcome_logger import get_outcomes_summary
+        rolling = get_outcomes_summary(user_id="sai_aditya", last_days=7)
+        await send_weekly_portfolio_digest(rolling_summary=rolling)
+        _log_scheduler_run("weekly_portfolio_job", "completed",
+                           meta={"recommendations_count": rolling.get("total", 0)})
+    except Exception as exc:
+        logger.error("weekly_portfolio_job failed: %s", exc)
+        _log_scheduler_run("weekly_portfolio_job", "failed")
+
+
+async def intraday_exit_alert_job() -> None:
+    """3:10 PM Mon-Fri: warn about any intraday positions still open near market close."""
+    try:
+        from db.recommendations import get_todays_recommendations
+        from notifications.telegram_sender import send_exit_alert
+        today_recs = get_todays_recommendations(user_id="sai_aditya")
+        open_intraday = [
+            r for r in today_recs
+            if r.get("style") == "intraday"
+            and r.get("outcome") in (None, "still_open")
+            and r.get("action") in ("BUY", "SELL")
+        ]
+        for rec in open_intraday:
+            await send_exit_alert(
+                symbol=rec.get("stock", ""),
+                reason="Market closes in 20 minutes — exit all intraday positions now.",
+                current_price=None,
+                entry_price=float(rec.get("entry_price", 0.0)),
+            )
+        _log_scheduler_run("intraday_exit_alert_job", "completed",
+                           meta={"recommendations_count": len(open_intraday)})
+    except Exception as exc:
+        logger.error("intraday_exit_alert_job failed: %s", exc)
+        _log_scheduler_run("intraday_exit_alert_job", "failed")
+
+
+async def drawdown_check_job() -> None:
+    """11 AM Mon-Fri: check long-term holdings for >8% drawdown and alert."""
+    try:
+        from db.recommendations import get_todays_recommendations
+        from data.upstox import get_live_quote
+        from notifications.telegram_sender import send_drawdown_alert
+        # Pull recent BUY/LONG_TERM recs still open
+        from db.supabase_client import supabase_client
+        from datetime import date, timedelta
+        cutoff = (date.today() - timedelta(days=365)).isoformat()
+        resp = (
+            supabase_client.table("recommendations_log")
+            .select("stock, entry_price, horizon, outcome")
+            .eq("user_id", "sai_aditya")
+            .eq("horizon", "LONG_TERM")
+            .eq("action", "BUY")
+            .in_("outcome", ["still_open", None])
+            .gte("date", cutoff)
+            .execute()
+        )
+        holdings = getattr(resp, "data", None) or []
+        for h in holdings:
+            try:
+                symbol = h.get("stock", "")
+                entry  = float(h.get("entry_price") or 0.0)
+                if entry <= 0 or not symbol:
+                    continue
+                quote = get_live_quote(symbol)
+                price = float(quote.get("last_price") or quote.get("ltp") or 0.0)
+                if price <= 0:
+                    continue
+                drawdown_pct = ((entry - price) / entry) * 100.0
+                if drawdown_pct >= 8.0:
+                    await send_drawdown_alert(
+                        symbol=symbol,
+                        entry_price=entry,
+                        current_price=price,
+                        drawdown_pct=round(drawdown_pct, 2),
+                    )
+            except Exception as exc:
+                logger.warning("drawdown_check_job: error for %s: %s", h.get("stock"), exc)
+        _log_scheduler_run("drawdown_check_job", "completed",
+                           meta={"stocks_analysed": len(holdings)})
+    except Exception as exc:
+        logger.error("drawdown_check_job failed: %s", exc)
+        _log_scheduler_run("drawdown_check_job", "failed")
 
 
 def trigger_morning_now() -> bool:
@@ -288,6 +386,36 @@ def init_scheduler(_app) -> AsyncIOScheduler:
         hour=18,
         minute=0,
         id="sunday_audit_job",
+        replace_existing=True,
+    )
+    # Weekly long-term portfolio health digest — Sunday 10 AM
+    scheduler.add_job(
+        weekly_portfolio_job,
+        trigger="cron",
+        day_of_week="sun",
+        hour=10,
+        minute=0,
+        id="weekly_portfolio_job",
+        replace_existing=True,
+    )
+    # Intraday time-based exit alert — 3:10 PM Mon-Fri (warn before 3:30 close)
+    scheduler.add_job(
+        intraday_exit_alert_job,
+        trigger="cron",
+        day_of_week="mon-fri",
+        hour=15,
+        minute=10,
+        id="intraday_exit_alert_job",
+        replace_existing=True,
+    )
+    # Long-term drawdown check — 11 AM Mon-Fri
+    scheduler.add_job(
+        drawdown_check_job,
+        trigger="cron",
+        day_of_week="mon-fri",
+        hour=11,
+        minute=0,
+        id="drawdown_check_job",
         replace_existing=True,
     )
     scheduler.start()

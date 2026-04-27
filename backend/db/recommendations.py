@@ -64,9 +64,27 @@ def log_recommendation(rec_dict: Dict[str, Any]) -> Dict[str, Any]:
             "message": f"Missing required recommendation fields: {', '.join(missing)}",
         }
 
-    optional = {"reasoning", "hold_period", "action", "confidence"}
+    # Extended optional fields — signal_snapshot and horizon enable RL training
+    optional = {
+        "reasoning", "hold_period", "action", "confidence",
+        "horizon",           # SHORT_TERM | LONG_TERM | BOTH
+        "horizon_reasoning", # why the agent picked this horizon
+        "signal_snapshot",   # full TA state dict — the RL training data
+        "exit_timestamp",    # datetime when trade was closed
+        "exit_price",        # actual price at exit
+        "bars_held",         # number of candles/days position was open
+        "risk_reward",       # risk:reward ratio at entry
+    }
     allowed = required | optional
     payload = {k: rec_dict[k] for k in rec_dict if k in allowed}
+
+    # Serialise signal_snapshot dict → JSON string if needed
+    if "signal_snapshot" in payload and isinstance(payload["signal_snapshot"], dict):
+        import json as _json
+        try:
+            payload["signal_snapshot"] = _json.dumps(payload["signal_snapshot"])
+        except Exception:
+            payload.pop("signal_snapshot", None)
 
     try:
         resp = supabase_client.table("recommendations_log").insert(payload).execute()
@@ -91,6 +109,36 @@ def log_recommendation(rec_dict: Dict[str, Any]) -> Dict[str, Any]:
             "id": None,
             "message": "Unexpected error while logging recommendation.",
         }
+
+
+def build_signal_snapshot(signal_dict: Dict[str, Any], extra: Dict[str, Any] = None) -> Dict[str, Any]:
+    """
+    Extract the key TA features from a full signal_dict into a compact
+    snapshot suitable for RL training.  Pass extra={} for any additional
+    fields (e.g. vix, regime, hour_of_day).
+    """
+    now = datetime.now(pytz.timezone("Asia/Kolkata"))
+    ema  = signal_dict.get("ema") or {}
+    rsi  = signal_dict.get("rsi") or {}
+    macd = signal_dict.get("macd") or {}
+    atr  = signal_dict.get("atr") or {}
+    vwap = signal_dict.get("vwap") or {}
+    snapshot = {
+        "ema_trend":       ema.get("trend", "neutral"),
+        "rsi":             rsi.get("value"),
+        "rsi_signal":      rsi.get("signal", "neutral"),
+        "macd_histogram":  macd.get("histogram"),
+        "macd_crossover":  macd.get("crossover", "neutral"),
+        "volume_ratio":    signal_dict.get("volume_ratio"),
+        "atr_pct":         atr.get("pct_of_price"),
+        "vwap_bias":       vwap.get("bias"),
+        "overall_signal":  signal_dict.get("overall_signal", "neutral"),
+        "hour_of_day":     now.hour,
+        "day_of_week":     now.weekday(),   # 0=Monday
+    }
+    if extra:
+        snapshot.update(extra)
+    return snapshot
 
 
 def get_todays_recommendations(user_id: str = "sai_aditya") -> List[Dict[str, Any]]:
@@ -118,6 +166,9 @@ def update_outcome(
     actual_exit: float,
     pnl: float,
     agent_correct: bool,
+    exit_timestamp: str = None,
+    exit_price: float = None,
+    bars_held: int = None,
 ) -> Dict[str, Any]:
     if outcome not in VALID_OUTCOMES:
         return {
@@ -125,17 +176,23 @@ def update_outcome(
             "message": f"Invalid outcome '{outcome}'.",
         }
 
+    payload: Dict[str, Any] = {
+        "outcome": outcome,
+        "actual_exit": actual_exit,
+        "pnl": pnl,
+        "agent_correct": agent_correct,
+    }
+    if exit_timestamp:
+        payload["exit_timestamp"] = exit_timestamp
+    if exit_price is not None:
+        payload["exit_price"] = exit_price
+    if bars_held is not None:
+        payload["bars_held"] = bars_held
+
     try:
         resp = (
             supabase_client.table("recommendations_log")
-            .update(
-                {
-                    "outcome": outcome,
-                    "actual_exit": actual_exit,
-                    "pnl": pnl,
-                    "agent_correct": agent_correct,
-                }
-            )
+            .update(payload)
             .eq("id", rec_id)
             .execute()
         )

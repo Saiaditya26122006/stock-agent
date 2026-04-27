@@ -188,6 +188,7 @@ def screen_universe(symbols: List[str]) -> List[Dict[str, Any]]:
 
     Returns only candidates with signal_count >= MIN_SIGNAL_COUNT,
     sorted by signal_count descending.
+    Each candidate now includes short_term_score, long_term_score and horizon.
     """
     candidates: List[Dict[str, Any]] = []
     total = len(symbols)
@@ -197,21 +198,117 @@ def screen_universe(symbols: List[str]) -> List[Dict[str, Any]]:
         try:
             result = _screen_single(symbol)
             if result is not None:
-                candidates.append(result)
+                # Enrich with dual horizon scores
+                enriched = _enrich_with_horizon(result)
+                candidates.append(enriched)
                 logger.info(
-                    "  -> %s qualifies: %d signals %s",
+                    "  -> %s qualifies: %d signals | ST:%d LT:%d | horizon:%s",
                     symbol,
-                    result["signal_count"],
-                    result["signals"],
+                    enriched["signal_count"],
+                    enriched["short_term_score"],
+                    enriched["long_term_score"],
+                    enriched["horizon"],
                 )
         except Exception as exc:
             logger.warning("Screener unexpected error for %s: %s", symbol, exc)
 
-        # Rate-limit cushion between Upstox calls
         if idx < total - 1:
             time.sleep(INTER_CALL_SLEEP_SEC)
 
-    # Sort by signal_count descending, then by price_change_pct descending
     candidates.sort(key=lambda c: (c["signal_count"], c["price_change_pct"]), reverse=True)
     logger.info("Screening complete: %d/%d symbols qualified.", len(candidates), total)
     return candidates
+
+
+# ---------------------------------------------------------------------------
+# Dual horizon scoring
+# ---------------------------------------------------------------------------
+
+def _enrich_with_horizon(candidate: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Compute short_term_score and long_term_score for a screened candidate
+    using data already computed in _screen_single, then add horizon tag.
+    """
+    signals      = candidate.get("signals", [])
+    price_chg    = candidate.get("price_change_pct", 0.0)
+    vol_ratio    = candidate.get("volume_ratio", 1.0)
+
+    # --- Short-term score (0-100) ---
+    st = 0
+    if "momentum" in signals:          st += 20   # strong today move
+    if "volume_spike" in signals:       st += 25   # unusual buying
+    if "fo_activity" in signals:        st += 20   # F&O participants active
+    if "near_52w_high" in signals:      st += 15   # breakout potential
+    if price_chg > 1.5:                st += 10   # intraday momentum
+    if vol_ratio > 3.0:                st += 10   # exceptional volume
+    short_term_score = min(st, 100)
+
+    # --- Long-term score (0-100) ---
+    # We use the 25-day proximity to high as a structural strength proxy
+    # and sector quality for a quick long-term quality proxy.
+    quality_sectors = {
+        "Banking", "IT", "Pharma", "Healthcare", "FMCG",
+        "Infrastructure", "Energy",
+    }
+    sector = candidate.get("sector", "Other")
+
+    lt = 0
+    if "near_52w_high" in signals:     lt += 20   # structural high — trend intact
+    if sector in quality_sectors:       lt += 20   # quality sector
+    if vol_ratio > 1.2:                lt += 15   # steady accumulation
+    if "fo_activity" in signals:        lt += 15   # institutional interest
+    if price_chg > 0:                  lt += 10   # positive trend
+    if "momentum" in signals:          lt += 10   # price confirmation
+    if vol_ratio > 2.0:                lt += 10   # strong accumulation
+    long_term_score = min(lt, 100)
+
+    # --- Horizon classification ---
+    if short_term_score >= 60 and long_term_score < 50:
+        horizon = "SHORT_TERM"
+    elif long_term_score >= 60 and short_term_score < 50:
+        horizon = "LONG_TERM"
+    elif short_term_score >= 60 and long_term_score >= 60:
+        horizon = "BOTH"
+    else:
+        horizon = "SHORT_TERM"   # default for any qualified candidate
+
+    return {
+        **candidate,
+        "short_term_score": short_term_score,
+        "long_term_score": long_term_score,
+        "horizon": horizon,
+    }
+
+
+def get_top_candidates(
+    symbols: List[str],
+    top_n_short: int = 5,
+    top_n_long: int = 5,
+) -> Dict[str, Any]:
+    """
+    Autonomous stock selection entry point.
+
+    Screens the universe and returns:
+      - top short-term candidates ranked by short_term_score
+      - top long-term candidates ranked by long_term_score
+    """
+    all_candidates = screen_universe(symbols)
+
+    short_candidates = sorted(
+        [c for c in all_candidates if c["horizon"] in ("SHORT_TERM", "BOTH")],
+        key=lambda c: c["short_term_score"],
+        reverse=True,
+    )[:top_n_short]
+
+    long_candidates = sorted(
+        [c for c in all_candidates if c["horizon"] in ("LONG_TERM", "BOTH")],
+        key=lambda c: c["long_term_score"],
+        reverse=True,
+    )[:top_n_long]
+
+    return {
+        "total_screened": len(symbols),
+        "total_qualified": len(all_candidates),
+        "short_term": short_candidates,
+        "long_term": long_candidates,
+    }

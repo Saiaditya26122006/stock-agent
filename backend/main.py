@@ -20,6 +20,7 @@ from analysis.gemini_synthesis import (
 )
 from analysis.ta_engine import analyse_stock
 from analysis.feasibility import check_target_feasibility, get_india_vix, get_market_regime
+from analysis.regime_classifier import get_regime_with_features
 from analysis.position_sizing import calculate_position_size
 from analysis.risk_scorer import compute_risk_score, should_skip_stock
 from analysis.sentiment import get_sentiment_batch
@@ -34,7 +35,9 @@ from analysis.gates import run_all_gates
 from data.nse import get_circuit_filter_status, get_gift_nifty, get_nse_announcements
 from data.nifty500 import NIFTY500_UNIVERSE
 from data.upstox import get_historical_ohlcv, test_connection as test_upstox_connection
-from analysis.screener import screen_universe
+from analysis.screener import screen_universe, get_top_candidates
+from analysis.ta_engine import get_mtf_confluence
+from db.recommendations import build_signal_snapshot
 from db.recommendations import (
     get_todays_recommendations,
     get_win_rate,
@@ -278,15 +281,25 @@ def run_analysis(req: Optional[RunAnalysisRequest] = None) -> Dict[str, Any]:
             logger.error("Premarket context build failed: %s", exc)
             premarket_context = get_full_premarket_context({})
 
+        confluence_map: Dict[str, str] = {}
+        timeframes_map: Dict[str, Dict[str, str]] = {}
+
         for symbol in symbols:
             try:
-                df = get_historical_ohlcv(symbol=symbol, interval="day", days=90)
-                signal = analyse_stock(symbol=symbol, timeframe="day", df=df)
-                full_signals[symbol] = signal
+                # Multi-timeframe confluence — replaces single daily candle analysis
+                mtf = get_mtf_confluence(symbol)
+                signal = mtf.get("signal_dict", {})
+                full_signals[symbol]   = signal
+                confluence_map[symbol] = mtf.get("confluence", "unknown")
+                timeframes_map[symbol] = mtf.get("timeframes", {})
                 results[symbol] = {
                     "symbol": signal.get("symbol"),
                     "current_price": signal.get("current_price"),
                     "overall_signal": signal.get("overall_signal"),
+                    "confluence": mtf.get("confluence"),
+                    "confluence_score": mtf.get("confluence_score", 0),
+                    "passes_confluence": mtf.get("passes_confluence", False),
+                    "timeframes": mtf.get("timeframes", {}),
                     "ema_trend": (signal.get("ema") or {}).get("trend"),
                     "rsi": (signal.get("rsi") or {}).get("value"),
                     "rsi_signal": (signal.get("rsi") or {}).get("signal"),
@@ -370,6 +383,8 @@ def run_analysis(req: Optional[RunAnalysisRequest] = None) -> Dict[str, Any]:
             symbols_signals=filtered_signals,
             user_config=user_config,
             regime_context=regime_context,
+            confluence_map=confluence_map,
+            timeframes_map=timeframes_map,
         )
 
         for skipped in skipped_symbols:
@@ -485,25 +500,34 @@ def run_analysis(req: Optional[RunAnalysisRequest] = None) -> Dict[str, Any]:
             user_config=user_config,
         )
 
-        # Log ALL recommendations to recommendations_log (not just BUY/SELL)
         for symbol, rec in recommendations.items():
             if rec.get("action") not in {"BUY", "SELL"}:
                 continue
             signal = full_signals.get(symbol, {})
+            snapshot = build_signal_snapshot(signal, extra={
+                "vix": india_vix,
+                "regime": market_regime,
+                "confluence": confluence_map.get(symbol, "unknown"),
+                "horizon": rec.get("horizon", "SHORT_TERM"),
+            })
             rec_payload = {
-                    "user_id": req.user_id,
-                    "date": _now_ist().date().isoformat(),
-                    "stock": symbol,
-                    "style": rec.get("style", "intraday"),
-                    "entry_price": rec.get("entry_price", 0.0),
-                    "target": rec.get("target", 0.0),
-                    "stop_loss": rec.get("stop_loss", 0.0),
-                    "risk_score": (risk_score_results.get(symbol) or {}).get("risk_score", 0.0),
-                    "sentiment_score": (sentiment_results.get(symbol) or {}).get("sentiment_score", 0.0),
-                    "action": rec.get("action", "SKIP"),
-                    "reasoning": rec.get("reasoning", ""),
-                    "hold_period": rec.get("hold_period", "N/A"),
-                    "confidence": rec.get("confidence", "LOW"),
+                    "user_id":           req.user_id,
+                    "date":              _now_ist().date().isoformat(),
+                    "stock":             symbol,
+                    "style":             rec.get("style", "intraday"),
+                    "entry_price":       rec.get("entry_price", 0.0),
+                    "target":            rec.get("target", 0.0),
+                    "stop_loss":         rec.get("stop_loss", 0.0),
+                    "risk_score":        (risk_score_results.get(symbol) or {}).get("risk_score", 0.0),
+                    "sentiment_score":   (sentiment_results.get(symbol) or {}).get("sentiment_score", 0.0),
+                    "action":            rec.get("action", "SKIP"),
+                    "reasoning":         rec.get("reasoning", ""),
+                    "hold_period":       rec.get("hold_period", "N/A"),
+                    "confidence":        rec.get("confidence", "LOW"),
+                    "horizon":           rec.get("horizon", "SHORT_TERM"),
+                    "horizon_reasoning": rec.get("horizon_reasoning", ""),
+                    "signal_snapshot":   snapshot,
+                    "risk_reward":       rec.get("risk_reward", 0.0),
             }
             log_res = log_recommendation(rec_payload)
             if not log_res.get("success"):
@@ -592,6 +616,56 @@ def recommendations_winrate(user_id: str = "sai_aditya", last_n: int = 20) -> Di
     return get_win_rate(user_id=user_id, last_n=last_n)
 
 
+@app.get("/recommendations/open", status_code=200, response_model=Dict[str, Any])
+def recommendations_open(user_id: str = "sai_aditya") -> Dict[str, Any]:
+    """All open positions (outcome is null or still_open) across all dates."""
+    try:
+        from db.supabase_client import supabase_client as _sb
+        resp = (
+            _sb.table("recommendations_log")
+            .select("*")
+            .eq("user_id", user_id)
+            .eq("action", "BUY")
+            .or_("outcome.is.null,outcome.eq.still_open")
+            .order("created_at", desc=True)
+            .execute()
+        )
+        positions = getattr(resp, "data", None) or []
+        return {"positions": positions, "count": len(positions)}
+    except Exception as exc:
+        logger.error("/recommendations/open failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Failed to fetch open positions.")
+
+
+@app.get("/recommendations/history", status_code=200, response_model=Dict[str, Any])
+def recommendations_history(user_id: str = "sai_aditya", last_n: int = 50) -> Dict[str, Any]:
+    """Closed trades ordered by date — used to build the equity curve."""
+    try:
+        from db.supabase_client import supabase_client as _sb
+        resp = (
+            _sb.table("recommendations_log")
+            .select("date,stock,action,entry_price,exit_price,pnl,outcome,horizon")
+            .eq("user_id", user_id)
+            .not_.is_("outcome", None)
+            .neq("outcome", "still_open")
+            .order("created_at", desc=False)
+            .limit(last_n)
+            .execute()
+        )
+        trades = getattr(resp, "data", None) or []
+        # Build cumulative equity curve
+        cumulative = 0.0
+        equity_curve = []
+        for t in trades:
+            pnl = float(t.get("pnl") or 0.0)
+            cumulative += pnl
+            equity_curve.append({"date": t.get("date"), "stock": t.get("stock"), "pnl": round(pnl, 2), "equity": round(cumulative, 2)})
+        return {"trades": trades, "equity_curve": equity_curve, "total": len(trades)}
+    except Exception as exc:
+        logger.error("/recommendations/history failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Failed to fetch trade history.")
+
+
 @app.get("/scheduler/status", status_code=200, response_model=Dict[str, Any])
 def scheduler_status() -> Dict[str, Any]:
     return get_scheduler_status()
@@ -643,6 +717,156 @@ def discover_stocks() -> Dict[str, Any]:
         "candidates_count": len(candidates),
         "candidates": candidates,
         "timestamp": _now_ist().isoformat(),
+    }
+
+
+@app.get("/auto-discover", status_code=200, response_model=None)
+def auto_discover() -> Dict[str, Any]:
+    """
+    Fully autonomous stock selection.
+
+    Scans Nifty 500, scores every stock on short-term and long-term tracks,
+    runs multi-timeframe confluence + full Gemini analysis on the top picks,
+    and returns ranked SHORT_TERM and LONG_TERM recommendations — no watchlist needed.
+
+    Expected runtime: 3-6 minutes (sequential Upstox + Gemini calls).
+    """
+    india_vix = 15.0
+    market_regime = "NORMAL"
+    regime_features: Dict[str, float] = {}
+    try:
+        # Use the multi-signal regime classifier (falls back to VIX rule if sklearn missing)
+        regime_result = get_regime_with_features(use_cache=True)
+        market_regime = regime_result.get("regime", "NORMAL")
+        regime_features = regime_result.get("features", {})
+        india_vix = regime_features.get("vix", 15.0)
+        regime_config = get_regime_config(india_vix)
+        logger.info("auto-discover regime: %s | VIX: %.2f | A-D: %.2f",
+                    market_regime, india_vix, regime_features.get("ad_ratio", 0.5))
+    except Exception as exc:
+        logger.error("auto-discover regime fetch failed: %s", exc)
+        try:
+            india_vix = float(get_india_vix())
+            market_regime = get_market_regime(india_vix)
+        except Exception:
+            pass
+        regime_config = get_regime_config(india_vix)
+
+    # Step 1 — screen universe and get top candidates per horizon
+    try:
+        top = get_top_candidates(NIFTY500_UNIVERSE, top_n_short=5, top_n_long=5)
+    except Exception as exc:
+        logger.error("auto-discover screening failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"Screening failed: {exc}") from exc
+
+    short_symbols = [c["symbol"] for c in top["short_term"]]
+    long_symbols  = [c["symbol"] for c in top["long_term"]]
+    all_symbols   = list(dict.fromkeys(short_symbols + long_symbols))  # dedup, order preserved
+
+    # Build horizon map from screening results
+    horizon_map: Dict[str, str] = {}
+    for c in top["short_term"]:
+        horizon_map[c["symbol"]] = "SHORT_TERM"
+    for c in top["long_term"]:
+        s = c["symbol"]
+        horizon_map[s] = "BOTH" if s in horizon_map else "LONG_TERM"
+
+    # Step 2 — multi-timeframe confluence + TA for each top pick
+    full_signals: Dict[str, Dict[str, Any]] = {}
+    confluence_map: Dict[str, str] = {}
+    timeframes_map: Dict[str, Dict[str, str]] = {}
+    errors: List[Dict[str, str]] = []
+
+    for symbol in all_symbols:
+        try:
+            mtf = get_mtf_confluence(symbol)
+            full_signals[symbol]   = mtf.get("signal_dict", {})
+            confluence_map[symbol] = mtf.get("confluence", "unknown")
+            timeframes_map[symbol] = mtf.get("timeframes", {})
+            logger.info("MTF for %s: %s | passes: %s", symbol, mtf["confluence"], mtf["passes_confluence"])
+        except Exception as exc:
+            logger.error("auto-discover MTF failed for %s: %s", symbol, exc)
+            errors.append({"symbol": symbol, "error": str(exc)})
+
+    # Step 3 — sentiment batch
+    try:
+        sentiment_results = get_sentiment_batch(all_symbols)
+    except Exception as exc:
+        logger.error("auto-discover sentiment failed: %s", exc)
+        sentiment_results = {s: {"symbol": s, "sentiment_score": 0.0} for s in all_symbols}
+
+    # Step 4 — Gemini synthesis with horizon routing
+    user_config = get_user_config(user_id="sai_aditya")
+    regime_context = get_regime_prompt_injection(regime_config)
+
+    recommendations = synthesise_all(
+        symbols_signals=full_signals,
+        user_config=user_config,
+        regime_context=regime_context,
+        horizon_map=horizon_map,
+        confluence_map=confluence_map,
+        timeframes_map=timeframes_map,
+    )
+
+    # Step 5 — enrich with risk scores + signal snapshots + log to DB
+    risk_score_results: Dict[str, Any] = {}
+    for symbol, rec in recommendations.items():
+        try:
+            sym_sent = float((sentiment_results.get(symbol) or {}).get("sentiment_score", 0.0))
+            signal   = full_signals.get(symbol, {})
+            risk_payload = compute_risk_score(signal_dict=signal, sentiment_score=sym_sent, symbol=symbol)
+            risk_score_results[symbol] = risk_payload
+            rec["risk_score"]      = float(risk_payload.get("risk_score", 5.0))
+            rec["sentiment_score"] = sym_sent
+        except Exception as exc:
+            logger.error("Risk scoring failed for %s: %s", symbol, exc)
+
+        # Log BUY/SELL picks with full signal snapshot for RL training
+        if rec.get("action") in {"BUY", "SELL"}:
+            try:
+                signal = full_signals.get(symbol, {})
+                snapshot = build_signal_snapshot(signal, extra={
+                    "vix": india_vix,
+                    "regime": market_regime,
+                    "confluence": confluence_map.get(symbol, "unknown"),
+                    "horizon": rec.get("horizon", "SHORT_TERM"),
+                })
+                rec_payload = {
+                    "user_id":           "sai_aditya",
+                    "date":              _now_ist().date().isoformat(),
+                    "stock":             symbol,
+                    "style":             rec.get("style", "intraday"),
+                    "entry_price":       rec.get("entry_price", 0.0),
+                    "target":            rec.get("target", 0.0),
+                    "stop_loss":         rec.get("stop_loss", 0.0),
+                    "risk_score":        float((risk_score_results.get(symbol) or {}).get("risk_score", 0.0)),
+                    "sentiment_score":   float((sentiment_results.get(symbol) or {}).get("sentiment_score", 0.0)),
+                    "action":            rec.get("action", "SKIP"),
+                    "reasoning":         rec.get("reasoning", ""),
+                    "hold_period":       rec.get("hold_period", "N/A"),
+                    "confidence":        rec.get("confidence", "LOW"),
+                    "horizon":           rec.get("horizon", "SHORT_TERM"),
+                    "horizon_reasoning": rec.get("horizon_reasoning", ""),
+                    "signal_snapshot":   snapshot,
+                    "risk_reward":       rec.get("risk_reward", 0.0),
+                }
+                log_recommendation(rec_payload)
+            except Exception as exc:
+                logger.error("auto-discover log failed for %s: %s", symbol, exc)
+
+    return {
+        "timestamp":        _now_ist().isoformat(),
+        "vix":              round(india_vix, 2),
+        "market_regime":    market_regime,
+        "scanned_count":    len(NIFTY500_UNIVERSE),
+        "qualified_count":  top["total_qualified"],
+        "short_term":       [r for r in recommendations.values() if r.get("horizon") == "SHORT_TERM"],
+        "long_term":        [r for r in recommendations.values() if r.get("horizon") == "LONG_TERM"],
+        "all_recommendations": recommendations,
+        "sentiment_results":   sentiment_results,
+        "risk_scores":         risk_score_results,
+        "screening_summary":   top,
+        "errors":              errors,
     }
 
 

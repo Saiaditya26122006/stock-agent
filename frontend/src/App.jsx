@@ -4,6 +4,7 @@ import Portfolio from "./pages/Portfolio";
 import Dashboard from "./pages/Dashboard";
 import Watchlist from "./pages/Watchlist";
 import Discovery from "./pages/Discovery";
+import AutoDiscover from "./pages/AutoDiscover";
 
 export default function App() {
   return (
@@ -16,6 +17,7 @@ export default function App() {
           <Route path="/recommendations" element={<Navigate to="/dashboard" replace />} />
           <Route path="/watchlist" element={<Watchlist />} />
           <Route path="/discovery" element={<Discovery />} />
+          <Route path="/auto-discover" element={<AutoDiscover />} />
           <Route path="/portfolio" element={<Portfolio />} />
         </Routes>
       </main>

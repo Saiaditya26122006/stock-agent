@@ -1,5 +1,5 @@
 import { NavLink } from "react-router-dom";
-import { LayoutDashboard, List, Briefcase, Zap, Compass } from "lucide-react";
+import { LayoutDashboard, List, Briefcase, Zap, Compass, Cpu } from "lucide-react";
 
 export default function Navbar() {
   const linkClass = ({ isActive }) =>
@@ -32,6 +32,10 @@ export default function Navbar() {
           <NavLink to="/discovery" className={linkClass}>
             <Compass size={18} />
             <span className="hidden sm:inline">Discovery</span>
+          </NavLink>
+          <NavLink to="/auto-discover" className={linkClass}>
+            <Cpu size={18} />
+            <span className="hidden sm:inline">Auto-Discover</span>
           </NavLink>
           <NavLink to="/portfolio" className={linkClass}>
             <Briefcase size={18} />
