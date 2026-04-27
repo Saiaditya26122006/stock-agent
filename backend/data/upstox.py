@@ -8,6 +8,7 @@ use v2, per current API capabilities.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from datetime import date, datetime, timedelta
@@ -19,6 +20,8 @@ from zoneinfo import ZoneInfo
 import httpx
 import pandas as pd
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 
 IST = ZoneInfo("Asia/Kolkata")
 # NSE equity instrument keys: NSE_EQ|<ISIN>
@@ -76,8 +79,7 @@ class UpstoxClient:
         token = os.getenv("UPSTOX_ACCESS_TOKEN", "").strip()
         if not token:
             raise ValueError(
-                "Missing UPSTOX_ACCESS_TOKEN in environment. "
-                "Set it in backend/.env and reload."
+                "UPSTOX_ACCESS_TOKEN not set — historical data will use yfinance fallback."
             )
         analytics_token = os.getenv("UPSTOX_ANALYTICS_TOKEN", "").strip()
         self._token = token
@@ -313,6 +315,60 @@ def get_instrument_key(symbol: str) -> str:
     )
 
 
+def _yfinance_ohlcv(symbol: str, interval: str, days: int) -> pd.DataFrame:
+    """
+    Fallback OHLCV fetcher using yfinance (no auth required).
+    Used automatically when Upstox token is missing or expired.
+    Supports NSE stocks via '<SYMBOL>.NS' ticker format.
+    """
+    try:
+        import yfinance as yf
+        # Map Upstox intervals to yfinance intervals
+        _yf_interval = {
+            "15minute": "15m",
+            "5minute":  "5m",
+            "1hour":    "1h",
+            "day":      "1d",
+            "week":     "1wk",
+        }.get(interval, "1d")
+
+        ticker = f"{symbol}.NS"
+        # yfinance requires period or start/end; use days to compute start
+        to_d  = datetime.now(IST).date()
+        from_d = to_d - timedelta(days=max(days, 1))
+
+        # Intraday data only available for last 60 days on yfinance
+        df_raw = yf.download(
+            ticker,
+            start=from_d.isoformat(),
+            end=(to_d + timedelta(days=1)).isoformat(),
+            interval=_yf_interval,
+            progress=False,
+            auto_adjust=True,
+        )
+        if df_raw is None or df_raw.empty:
+            logger.warning("yfinance returned empty data for %s/%s", symbol, interval)
+            return pd.DataFrame()
+
+        # Flatten MultiIndex columns if present (yfinance >= 0.2 returns MultiIndex)
+        if isinstance(df_raw.columns, pd.MultiIndex):
+            df_raw.columns = df_raw.columns.get_level_values(0)
+
+        df_raw = df_raw.rename(columns={
+            "Open": "open", "High": "high", "Low": "low",
+            "Close": "close", "Volume": "volume",
+        })
+        df_raw.index.name = "date"
+        df = df_raw[["open", "high", "low", "close", "volume"]].reset_index()
+        df["date"] = pd.to_datetime(df["date"]).dt.tz_localize("Asia/Kolkata", ambiguous="NaT", nonexistent="NaT")
+        df = df.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
+        logger.info("yfinance fallback: %s %s rows=%d", symbol, interval, len(df))
+        return df
+    except Exception as exc:
+        logger.error("yfinance fallback failed for %s/%s: %s", symbol, interval, exc)
+        return pd.DataFrame()
+
+
 def get_historical_ohlcv(symbol: str, interval: str, days: int) -> pd.DataFrame:
     if days < 1:
         raise ValueError("days must be at least 1.")
@@ -321,23 +377,34 @@ def get_historical_ohlcv(symbol: str, interval: str, days: int) -> pd.DataFrame:
             f"interval must be one of {sorted(_ALLOWED_INTERVALS)}, got {interval!r}."
         )
 
-    client = _get_client()
+    # Try Upstox first; fall back to yfinance if token is missing/expired (Railway)
+    try:
+        client = _get_client()
+    except Exception as exc:
+        logger.warning("Upstox client unavailable (%s) — falling back to yfinance", exc)
+        return _yfinance_ohlcv(symbol, interval, days)
+
     ik = _resolve_instrument_key(symbol)
     to_d = datetime.now(IST).date()
     from_d = to_d - timedelta(days=days)
 
-    if interval == "day":
-        candles = client.get_historical_candles_v2(ik, "day", to_d, from_d)
-    elif interval == "week":
-        candles = client.get_historical_candles_v2(ik, "week", to_d, from_d)
-    elif interval == "5minute":
-        candles = client.get_historical_candles_v3(ik, "minutes", "5", to_d, from_d)
-    elif interval == "15minute":
-        candles = client.get_historical_candles_v3(ik, "minutes", "15", to_d, from_d)
-    elif interval == "1hour":
-        candles = client.get_historical_candles_v3(ik, "hours", "1", to_d, from_d)
-    else:
-        raise ValueError(f"Unsupported interval {interval!r}.")
+    try:
+        if interval == "day":
+            candles = client.get_historical_candles_v2(ik, "day", to_d, from_d)
+        elif interval == "week":
+            candles = client.get_historical_candles_v2(ik, "week", to_d, from_d)
+        elif interval == "5minute":
+            candles = client.get_historical_candles_v3(ik, "minutes", "5", to_d, from_d)
+        elif interval == "15minute":
+            candles = client.get_historical_candles_v3(ik, "minutes", "15", to_d, from_d)
+        elif interval == "1hour":
+            candles = client.get_historical_candles_v3(ik, "hours", "1", to_d, from_d)
+        else:
+            raise ValueError(f"Unsupported interval {interval!r}.")
+    except Exception as exc:
+        logger.warning("Upstox OHLCV fetch failed for %s/%s (%s) — falling back to yfinance",
+                       symbol, interval, exc)
+        return _yfinance_ohlcv(symbol, interval, days)
 
     rows: List[Tuple[datetime, float, float, float, float, float]] = []
     for c in candles:
@@ -352,7 +419,10 @@ def get_historical_ohlcv(symbol: str, interval: str, days: int) -> pd.DataFrame:
         columns=["date", "open", "high", "low", "close", "volume"],
     )
     if df.empty:
-        return df
+        logger.warning("Upstox returned 0 candles for %s/%s — falling back to yfinance",
+                       symbol, interval)
+        return _yfinance_ohlcv(symbol, interval, days)
+
     df = df.sort_values("date", ascending=True).reset_index(drop=True)
     return df
 

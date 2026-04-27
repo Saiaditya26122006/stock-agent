@@ -1,9 +1,8 @@
 fastapi
-uvicorn
+uvicorn[standard]
 pandas
 numpy==1.26.4
-pandas-ta @ https://www.pandas-ta.dev/assets/zip/pandas_ta-0.3.14b.tar.gz
-anthropic
+pandas-ta
 google-genai
 supabase
 httpx
@@ -15,14 +14,14 @@ python-telegram-bot
 APScheduler
 jinja2
 pytz
-pytest
 websockets
 brotli
 newsapi-python
 upstox-python-sdk
-vectorbt
-# RL / ML stack (optional — agent gracefully degrades if not installed)
+yfinance
+# ML / regime classifier (lightweight)
 scikit-learn
 joblib
-gymnasium
-stable-baselines3
+# RL stack (graceful degradation if not installed — comment out if build is slow)
+# gymnasium
+# stable-baselines3
